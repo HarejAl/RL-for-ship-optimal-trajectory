@@ -1,0 +1,9 @@
+numpy
+scipy
+torch
+gymnasium>=1.0
+stable-baselines3>=2.5
+matplotlib
+pytest
+tqdm
+rich

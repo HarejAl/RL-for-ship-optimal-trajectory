@@ -1,184 +1,170 @@
-import gymnasium as gym
+"""
+Gymnasium environment: steer a point-mass ship through a 2D wind field to a goal.
+
+Observation : [x, y, vx, vy, xf, yf]          (float32)
+Action      : [ux, uy] thrust, each in [-u_max, u_max]
+Reward      : -stage_cost(u) + target_w * (d_prev - d)     (potential-based shaping)
+              + goal_bonus when the goal disc is entered
+              - oob_penalty when the ship leaves the wind grid
+Termination : goal reached, or ship outside the wind grid
+Truncation  : max_steps
+
+The episode cost J = sum of stage costs (time + control energy) is accumulated in
+info["J"], so it can be compared directly with the DP baseline which minimises
+the same quantity. The shaping term is potential-based (potential = -target_w*d)
+and therefore does not change the ranking of successful trajectories.
+
+Dynamics live in `dynamics.py` and are shared with the baseline.
+"""
+
 import numpy as np
+import gymnasium as gym
 from gymnasium import spaces
-from scipy.interpolate import RegularGridInterpolator
 
-class CustomEnv(gym.Env):
-    """Custom Environment that follows gym interface."""
+from dynamics import ShipParams, ship_step, stage_cost
+from wind import WindField
 
-    metadata = {"render_modes": ["human"], "render_fps": 30}
 
-    def __init__(self, DICT):
+class ShipEnv(gym.Env):
+    metadata = {"render_modes": []}
+
+    def __init__(
+        self,
+        wind=None,
+        params=None,
+        wind_sampler=None,
+        spawn_box=(0.0, 10.0),
+        goal_radius=0.25,
+        min_start_goal_dist=2.0,
+        max_steps=600,
+        target_w=1.0,
+        goal_bonus=100.0,
+        oob_penalty=100.0,
+    ):
+        """
+        wind         : WindField, or a legacy dict with keys x, y, Intensity, Direction
+        wind_sampler : optional callable(np_random) -> WindField, resampled at each reset
+                       (used to train wind-aware policies on a distribution of fields)
+        spawn_box    : start and goal are sampled uniformly in this square
+        """
         super().__init__()
-        # Define action and observation space
-        # They must be gym.spaces objects
-        # Example when using discrete actions:
+        if isinstance(wind, dict):
+            wind = WindField.from_legacy_dict(wind)
+        if wind is None and wind_sampler is None:
+            raise ValueError("provide a wind field or a wind_sampler")
+        self.wind = wind
+        self.wind_sampler = wind_sampler
+        self.p = params or ShipParams()
+        self.spawn_box = spawn_box
+        self.goal_radius = goal_radius
+        self.min_start_goal_dist = min_start_goal_dist
+        self.max_steps = max_steps
+        self.target_w = target_w
+        self.goal_bonus = goal_bonus
+        self.oob_penalty = oob_penalty
+
         self.action_space = spaces.Box(
-            low=-10, high=10, shape=(2,), dtype=np.float64
+            low=-self.p.u_max, high=self.p.u_max, shape=(2,), dtype=np.float32
         )
+        v_lim = 20.0
+        lo = np.array([-20.0, -20.0, -v_lim, -v_lim, -20.0, -20.0], dtype=np.float32)
+        self.observation_space = spaces.Box(low=lo, high=-lo, dtype=np.float32)
 
-        self.observation_space = spaces.Box(
-            low=-11, high=11, shape=(6,), dtype=np.float64
-        )
-        
-        self.state = np.zeros(4,)
-        self.state_prev = np.zeros(4,)
-        
-        self.cd1 = 0.5
-        self.cd2 = 0.25
-        self.dt = 0.5e-1 #20Hz
-        
-        self.XYf = np.random.uniform(5,10,2)
-        self.state_0 = np.zeros((4,))
-        
-        self.steps = 0 
-        self.rew = 0
-        self.x_range = (np.min(DICT['x']), np.max(DICT['x']))
-        self.y_range = (np.min(DICT['y']), np.max(DICT['y']))
-        
-        self.xx = DICT['x']
-        self.yy = DICT['y']
-        self.intensity = DICT['Intensity']
-        self.direction = DICT['Direction']
-        
-        self.INT_interp = RegularGridInterpolator((self.xx, self.yy), DICT['Intensity'], bounds_error=False, fill_value=10)
-        self.DIR_interp = RegularGridInterpolator((self.xx, self.yy), DICT['Direction'], bounds_error=False, fill_value=0)
-
-        self.ctrl_w = 10e-3
-        self.time_w = 1e-4
-        self.target_w = 1
-
-    @property
-    def is_healthy(self):
-        x = self.state[0]
-        y = self.state[1]
-
-        min_x, max_x = self.x_range
-        min_y, max_y = self.y_range
-
-        healthy_x = min_x <= x <= max_x
-        healthy_y = min_y <= y <= max_y
-        is_healthy = healthy_x and healthy_y
-
-        return is_healthy
-    
-    def step(self, action):
-
-        x = self.state[0]
-        y = self.state[1]
-        vx = self.state[2]
-        vy = self.state[3]
-
-        ux = action[0]
-        uy = action[1]
-
-        w = self.INT_interp([[x, y]])[0]
-        d = self.DIR_interp([[x, y]])[0]
-        
-        Fu_x = (w)**2 * self.cd2 * np.sin(d) + vx*abs(vx) *self.cd2 # Force of the wind
-        Fu_y = (w)**2 * self.cd2 * np.cos(d) + vy*abs(vy) *self.cd2
-        
-        """
-        x'' + cx' = u_x - Fux --> because of the convention we used for the direction, the wind force is helping 
-        -> x'' = u_x - F_x - cx'
-        """
-        
-        ax = ux - self.cd1 * vx*abs(vx) - Fu_x
-        ay = uy - self.cd1 * vy*abs(vy) - Fu_y
-        
-        vx_next = vx + self.dt * ax
-        x_next = x + self.dt * vx
-        vy_next = vy + self.dt * ay
-        y_next = y + self.dt * vy
-        
-        next_state = np.array([x_next, y_next, vx_next, vy_next])
-        
-        self.state = next_state
-        reward = self.get_rew(action)
-        self.state_prev = self.state
-        observation = next_state
-        observation = np.concatenate((next_state, self.XYf))
-        
-        info = {
-            "x_position": self.state[0],
-        }
-        
-        terminated = False
-        
-    
-        if abs(x_next - self.XYf[0]) <= 2e-1 and abs(y_next - self.XYf[1]) <= 2e-1:
-            terminated = True
-            reward += 1e2 # Bonus reward for reaching the goal
-        
-        truncated = False
-        
-        if not self.is_healthy:
-            terminated = True
-         
-        return observation, reward, terminated, truncated, info
-    
-    def get_rew(self, action):
-        
-        self.steps += 1
-        
-        time_cost = self.steps*self.time_w
-        
-        control_cost = np.sum(action**2) * self.ctrl_w
-        
-        dist2target = np.sqrt((self.state[0] - self.XYf[0])**2 + (self.state[1] - self.XYf[1])**2)
-        dist2target_prev = np.sqrt((self.state_prev[0] - self.XYf[0])**2 + (self.state_prev[1] - self.XYf[1])**2)
-        target_rew =  -(dist2target - dist2target_prev) * self.target_w
-        # target_rew = 1/np.maximum(dist2target, 1e-1) * self.target_w
-
-        rew = - control_cost + target_rew - time_cost # if the agent is going close to the goal, the distance is shortening --> also reward is decreasing --> reason why there is a minus
-        
-        return rew 
-        
-
-    def reset(self, seed=None, options=None):
-        
-        self.state = np.random.uniform(0, 10, size=(4,))
-        self.state[-2:] = 0
-        
-        self.XYf = np.random.uniform(5,10,2)
-        
-        observation = np.concatenate((self.state, self.XYf))
-        
+        self.state = np.zeros(4)
+        self.goal = np.zeros(2)
         self.steps = 0
-        
-        info = 'reset'
-        
-        return observation, info
+        self.J = 0.0
 
-if __name__ == "__main__":
-    import pickle
+    # ------------------------------------------------------------------ helpers
+    @property
+    def bounds(self):
+        return self.wind.extent
 
-    # Load dictionary
-    with open('data.pkl', 'rb') as f:
-        Dict = pickle.load(f)
-        
-    env = CustomEnv(Dict)
-    obs = env.reset()[0]
-    print(f'xf : {obs[-2]}, yf : {obs[-1]}')
-    aa = 10
-    a = np.array([aa,aa])
-    observation, reward, terminated, truncated, info = env.step(a)
-    print(f'x : {observation[0]}, y : {observation[1]}, rew : {reward}')
-    a = np.array([aa,aa])
-    observation, reward, terminated, truncated, info = env.step(a)
-    print(f'x : {observation[0]}, y : {observation[1]}, rew : {reward}')
-    a = np.array([aa,aa])
-    observation, reward, terminated, truncated, info = env.step(a)
-    print(f'x : {observation[0]}, y : {observation[1]}, rew : {reward}')
-    a = np.array([aa,aa])
-    observation, reward, terminated, truncated, info = env.step(a)
-    print(f'x : {observation[0]}, y : {observation[1]}, rew : {reward}')
-    a = np.array([aa,aa])
-    observation, reward, terminated, truncated, info = env.step(a)
-    print(f'x : {observation[0]}, y : {observation[1]}, rew : {reward}')
-    a = np.array([aa,aa])
-    observation, reward, terminated, truncated, info = env.step(a)
-    print(f'x : {observation[0]}, y : {observation[1]}, rew : {reward}')
-    
+    def in_bounds(self, x, y):
+        xmin, xmax, ymin, ymax = self.wind.extent
+        return (xmin <= x <= xmax) and (ymin <= y <= ymax)
+
+    def dist_to_goal(self, state=None):
+        s = self.state if state is None else state
+        return float(np.hypot(s[0] - self.goal[0], s[1] - self.goal[1]))
+
+    def _obs(self):
+        return np.concatenate((self.state, self.goal)).astype(np.float32)
+
+    def _info(self, **extra):
+        info = {
+            "J": self.J,
+            "t": self.steps * self.p.dt,
+            "dist": self.dist_to_goal(),
+            "success": False,
+            "oob": False,
+        }
+        info.update(extra)
+        return info
+
+    # ---------------------------------------------------------------- gym API
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
+        options = options or {}
+
+        if "wind" in options:
+            self.wind = options["wind"]
+        elif self.wind_sampler is not None:
+            self.wind = self.wind_sampler(self.np_random)
+
+        lo, hi = self.spawn_box
+        if "start" in options:
+            start = np.asarray(options["start"], dtype=np.float64)
+        else:
+            start = self.np_random.uniform(lo, hi, size=2)
+
+        if "goal" in options:
+            goal = np.asarray(options["goal"], dtype=np.float64)
+        else:
+            goal = self.np_random.uniform(lo, hi, size=2)
+            for _ in range(100):
+                if np.linalg.norm(goal - start) >= self.min_start_goal_dist:
+                    break
+                goal = self.np_random.uniform(lo, hi, size=2)
+
+        v0 = np.asarray(options.get("velocity", (0.0, 0.0)), dtype=np.float64)
+        self.state = np.array([start[0], start[1], v0[0], v0[1]], dtype=np.float64)
+        self.goal = goal
+        self.steps = 0
+        self.J = 0.0
+        return self._obs(), self._info()
+
+    def step(self, action):
+        u = np.clip(np.asarray(action, dtype=np.float64), -self.p.u_max, self.p.u_max)
+        x, y, vx, vy = self.state
+        wx, wy = self.wind(x, y)
+        x1, y1, vx1, vy1 = ship_step(x, y, vx, vy, u[0], u[1], float(wx), float(wy), self.p)
+
+        d_prev = self.dist_to_goal()
+        self.state = np.array([x1, y1, vx1, vy1], dtype=np.float64)
+        d = self.dist_to_goal()
+
+        cost = float(stage_cost(u[0], u[1], self.p))
+        self.J += cost
+        self.steps += 1
+        reward = -cost + self.target_w * (d_prev - d)
+
+        terminated = False
+        success = False
+        oob = False
+        if d <= self.goal_radius:
+            terminated = True
+            success = True
+            reward += self.goal_bonus
+        elif not self.in_bounds(x1, y1):
+            terminated = True
+            oob = True
+            reward -= self.oob_penalty
+        truncated = (not terminated) and self.steps >= self.max_steps
+
+        info = self._info(success=success, oob=oob, stage_cost=cost, wind=(float(wx), float(wy)))
+        return self._obs(), float(reward), terminated, truncated, info
 
 
+# Backwards-compatible name used by the legacy scripts: CustomEnv(DICT)
+CustomEnv = ShipEnv
