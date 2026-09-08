@@ -54,6 +54,10 @@ def parse_args():
     ap.add_argument("--local-res", type=int, default=16)
     ap.add_argument("--global-res", type=int, default=16)
     ap.add_argument("--no-global", action="store_true")
+    ap.add_argument("--obs", choices=["wind", "plain"], default="wind",
+                    help="wind: Dict obs with CNN maps; plain: 6-vector obs with an MLP (control experiment)")
+    ap.add_argument("--fixed-wind", default=None,
+                    help="train and validate on ONE field: 'legacy' (WF.pkl) or an integer generator seed")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="auto")
     ap.add_argument("--tag", default=None)
@@ -61,9 +65,20 @@ def parse_args():
     return ap.parse_args()
 
 
-def _env_factory(n_fields, seed_base, obs_cfg, env_kwargs):
-    pool = WindFieldPool(n_fields, seed_base=seed_base)
-    return make_wind_env(pool=pool, obs_cfg=obs_cfg, env_kwargs=env_kwargs)
+def _env_factory(n_fields, seed_base, obs_cfg, env_kwargs, fixed_wind=None, plain=False):
+    from stable_baselines3.common.monitor import Monitor
+    if fixed_wind is not None:
+        from wind import WindField, generate_wind_field
+        wind = WindField.load_legacy() if fixed_wind == "legacy" else generate_wind_field(int(fixed_wind))
+        pool = None
+    else:
+        wind = None
+        pool = WindFieldPool(n_fields, seed_base=seed_base)
+    if plain:
+        from env import ShipEnv
+        env = ShipEnv(wind, wind_sampler=None if pool is None else pool.sampler, **env_kwargs)
+        return Monitor(env, info_keywords=("success", "J", "t", "goal_radius"))
+    return make_wind_env(pool=pool, wind=wind, obs_cfg=obs_cfg, env_kwargs=env_kwargs)
 
 
 def main():
@@ -91,23 +106,29 @@ def main():
         r0, thr, shrink, window = args.curriculum
         train_kwargs["curriculum"] = (r0, thr, shrink, int(window))
     vec_cls = SubprocVecEnv if args.n_envs > 1 else DummyVecEnv
+    plain = args.obs == "plain"
     train_env = make_vec_env(
-        functools.partial(_env_factory, args.n_train_fields, TRAIN_SEED_BASE, obs_cfg, train_kwargs),
+        functools.partial(_env_factory, args.n_train_fields, TRAIN_SEED_BASE, obs_cfg, train_kwargs,
+                          args.fixed_wind, plain),
         n_envs=args.n_envs, seed=args.seed, vec_env_cls=vec_cls,
     )
     eval_env = make_vec_env(
-        functools.partial(_env_factory, args.n_eval_fields, EVAL_SEED_BASE, obs_cfg, env_kwargs),
+        functools.partial(_env_factory, args.n_eval_fields, EVAL_SEED_BASE, obs_cfg, env_kwargs,
+                          args.fixed_wind, plain),
         n_envs=1, seed=args.seed + 12345, vec_env_cls=DummyVecEnv,
     )
 
-    policy_kwargs = dict(
-        features_extractor_class=WindCNNExtractor,
-        features_extractor_kwargs=dict(map_features=64, vec_features=64),
-        net_arch=dict(pi=[256, 256], qf=[256, 256]),
-        share_features_extractor=False,
-    )
+    if plain:
+        policy_kwargs = dict(net_arch=dict(pi=[256, 256], qf=[256, 256]))
+    else:
+        policy_kwargs = dict(
+            features_extractor_class=WindCNNExtractor,
+            features_extractor_kwargs=dict(map_features=64, vec_features=64),
+            net_arch=dict(pi=[256, 256], qf=[256, 256]),
+            share_features_extractor=False,
+        )
     common = dict(
-        policy="MultiInputPolicy", env=train_env, learning_rate=args.lr, gamma=args.gamma,
+        policy="MlpPolicy" if plain else "MultiInputPolicy", env=train_env, learning_rate=args.lr, gamma=args.gamma,
         buffer_size=args.buffer_size, batch_size=args.batch_size, learning_starts=args.learning_starts,
         train_freq=1, gradient_steps=args.gradient_steps, policy_kwargs=policy_kwargs,
         seed=args.seed, device=args.device, verbose=0,
@@ -126,8 +147,8 @@ def main():
         model = SAC(ent_coef="auto", **common)
 
     model.set_logger(configure(log_dir, ["stdout", "csv"]))
-    print(f"[{tag}] {args.algo.upper()} on {args.n_train_fields} train fields, "
-          f"{args.n_envs} envs, device={model.device}, obs={obs_cfg}, env={train_kwargs}")
+    print(f"[{tag}] {args.algo.upper()} on {'ONE field (' + str(args.fixed_wind) + ')' if args.fixed_wind else str(args.n_train_fields) + ' train fields'}, "
+          f"{args.n_envs} envs, device={model.device}, obs={'plain' if plain else obs_cfg}, env={train_kwargs}")
     print(model.policy)
 
     callbacks = [
