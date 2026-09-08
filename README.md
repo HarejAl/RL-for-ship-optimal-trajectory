@@ -153,20 +153,42 @@ Observation-design ablation on the same 200 training fields (TD3, curriculum):
 | flattened 6x6 local crop + 8x8 global map (370-d, MLP) | 20% (16% at 220k) | fails |
 | Dict local 16x16 + global 16x16 with CNN extractor (TD3 or SAC) | no successes by 250k | fails |
 
-Conclusion so far: TD3/SAC from scratch do not extract wind information from map
-inputs within the step budgets that fit on a shared GPU; the map channels act as
-noise for the critic. The natural remedy is to use the DP baseline as a teacher:
-one value-iteration solve yields the optimal action for *every* state of that
-(field, goal), so a large supervised dataset for the CNN policy is cheap, and RL
-can fine-tune from the cloned policy ("amortised DP"). This is the recommended
-next step and is also a cleaner story for the paper.
+Conclusion: TD3/SAC from scratch do not extract wind information from map inputs
+within the step budgets that fit on a shared GPU; the map channels act as noise for
+the critic. The remedy adopted is to use the DP baseline as a teacher ("amortised DP").
+
+### DP as teacher: behaviour cloning of the wind-aware CNN policy
+
+`dp_dataset.py` solved value iteration for 150 training fields x 2 goals (300 solves,
+~1 h of GPU), labelling 746k states (DP rollouts from random starts plus random
+states) with the greedy DP action. `pretrain_bc.py` regressed the CNN actor on them
+(15 epochs, validation on 15 held-out fields: MSE 0.11 in scaled action units).
+Same 30 held-out benchmark cases as above, no RL fine-tuning yet:
+
+| | DP baseline | wind-aware clone (`bc_v1`) | wind-blind RL |
+| --- | --- | --- | --- |
+| success rate | 97% | 63% | 73% |
+| cost gap, 18 cases solved by all three | reference | **median +3.3%** | median +31.3% |
+| cost gap spread (10th-90th pct, cases solved) | | -0.6% to +15.7% | +20% to +74% |
+| online time per episode | 17 s solve | 0.35 s | 0.04 s |
+
+The cloned policy follows the DP routes (see `output/compare_bc_v1.png`), including
+detours around vortices and through calm zones, and occasionally beats the coarse-grid
+DP. Data matters: the same recipe on 37 fields gave 20-30% success and a 7.6% median
+gap. Remaining weakness is the success rate (compounding imitation error: stalling just
+outside the goal disc, occasional drift out of the domain), which RL fine-tuning targets.
+
+Fine-tuning notes: plain TD3 from the clone erodes it within ~10k actor updates (50% ->
+15% success) because the critic is not yet accurate; TD3+BC (`--bc-weight`, cloning
+term on demonstration samples in the actor loss, replay buffer pre-filled with the DP
+transitions, critic warm-up with the actor frozen) is used instead.
 
 ---
 
 ## Roadmap
 
 1. Done: physically consistent dynamics, seeded environment, wind-field generator, DP baseline and benchmark harness.
-2. Done (code): wind-aware policy with a CNN over the local crop and the global map, trained on random fields, evaluated on held-out fields against the DP baseline. Training runs and results in progress.
+2. Done: wind-aware CNN policy via DP-teacher behaviour cloning (median gap 3.3% on held-out fields, 63% success); TD3+BC fine-tuning in progress to raise the success rate.
 3. Preference-conditioned policy: the cost weight ratio as an input, giving the whole fast-to-economical Pareto front from one network.
 4. Time-varying wind: receding-horizon execution where the field is swapped at each forecast step, compared with re-solved DP.
 5. Real forecast data (for example ERA5 10 m wind) and a 3-DOF ship model.
