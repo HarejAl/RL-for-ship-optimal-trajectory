@@ -243,6 +243,26 @@ class ValueIterationPlanner:
         return self.exec_actions[int(q.argmin())].cpu().numpy().astype(np.float64)
 
     @torch.no_grad()
+    def q_values_batch(self, states, actions=None):
+        """Q for a batch of states (B, 4) and every action (M, 2); returns (B, M)."""
+        actions = self.exec_actions if actions is None else actions
+        s = torch.as_tensor(np.asarray(states, dtype=np.float32), device=self.device)
+        wx, wy = self.sampler(s[:, 0], s[:, 1])
+        x, y, vx, vy = (s[:, i:i + 1] for i in range(4))
+        ux, uy = actions[None, :, 0], actions[None, :, 1]
+        x1, y1, vx1, vy1 = ship_step(x, y, vx, vy, ux, uy, wx[:, None], wy[:, None], self.p)
+        idx, frac, oob = self._locate(x1, y1, vx1, vy1)
+        Vn = self._interp(self.V, idx, frac)
+        return stage_cost(ux, uy, self.p) + torch.where(oob, self.oob_cost, Vn)
+
+    def act_batch(self, states):
+        """Greedy actions (B, 2) and their Q values (B,) for a batch of states."""
+        q = self.q_values_batch(states)
+        best = q.argmin(dim=1)
+        return (self.exec_actions[best].cpu().numpy().astype(np.float64),
+                q.gather(1, best[:, None])[:, 0].cpu().numpy())
+
+    @torch.no_grad()
     def value(self, x, y, vx=0.0, vy=0.0):
         """Interpolated value at arbitrary (broadcastable) numpy coordinates."""
         x, y, vx, vy = np.broadcast_arrays(np.asarray(x, float), np.asarray(y, float),
@@ -266,6 +286,7 @@ class ValueIterationPlanner:
                                            velocity=velocity))
         traj = [env.state.copy()]
         actions, rewards = [], []
+        terminated = truncated = False
         for _ in range(max_steps):
             u = self.act(env.state)
             obs, r, terminated, truncated, info = env.step(u)
@@ -276,6 +297,6 @@ class ValueIterationPlanner:
                 break
         return dict(
             J=info["J"], t=info["t"], success=info["success"], oob=info["oob"],
-            steps=len(actions), return_=float(np.sum(rewards)),
-            traj=np.array(traj), actions=np.array(actions),
+            steps=len(actions), return_=float(np.sum(rewards)), terminated=bool(terminated),
+            traj=np.array(traj), actions=np.array(actions), rewards=np.array(rewards),
         )

@@ -4,3 +4,4 @@ output/
 .pytest_cache/
 *.egg-info/
 models/
+data/
