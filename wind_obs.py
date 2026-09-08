@@ -187,5 +187,5 @@ def make_wind_env(pool=None, wind=None, obs_cfg=None, env_kwargs=None, monitor=T
     env = WindObsWrapper(base, **obs_cfg)
     if monitor:
         from stable_baselines3.common.monitor import Monitor
-        env = Monitor(env, info_keywords=("success", "J", "t"))
+        env = Monitor(env, info_keywords=("success", "J", "t", "goal_radius"))
     return env

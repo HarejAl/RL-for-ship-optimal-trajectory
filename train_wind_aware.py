@@ -48,6 +48,8 @@ def parse_args():
     ap.add_argument("--goal-bonus", type=float, default=10.0)
     ap.add_argument("--oob-penalty", type=float, default=10.0)
     ap.add_argument("--target-w", type=float, default=1.0, help="distance shaping weight")
+    ap.add_argument("--curriculum", type=float, nargs=4, default=None, metavar=("R0", "THRESH", "SHRINK", "WINDOW"),
+                    help="adaptive goal-radius curriculum for the training envs, e.g. 1.0 0.7 0.8 50")
     ap.add_argument("--local-size", type=float, default=2.0)
     ap.add_argument("--local-res", type=int, default=16)
     ap.add_argument("--global-res", type=int, default=16)
@@ -84,9 +86,13 @@ def main():
     WindObsWrapper.save_config(os.path.join(MODEL_DIR, f"{tag}.json"), obs_cfg)
 
     env_kwargs = dict(goal_bonus=args.goal_bonus, oob_penalty=args.oob_penalty, target_w=args.target_w)
+    train_kwargs = dict(env_kwargs)
+    if args.curriculum:
+        r0, thr, shrink, window = args.curriculum
+        train_kwargs["curriculum"] = (r0, thr, shrink, int(window))
     vec_cls = SubprocVecEnv if args.n_envs > 1 else DummyVecEnv
     train_env = make_vec_env(
-        functools.partial(_env_factory, args.n_train_fields, TRAIN_SEED_BASE, obs_cfg, env_kwargs),
+        functools.partial(_env_factory, args.n_train_fields, TRAIN_SEED_BASE, obs_cfg, train_kwargs),
         n_envs=args.n_envs, seed=args.seed, vec_env_cls=vec_cls,
     )
     eval_env = make_vec_env(
@@ -121,7 +127,7 @@ def main():
 
     model.set_logger(configure(log_dir, ["stdout", "csv"]))
     print(f"[{tag}] {args.algo.upper()} on {args.n_train_fields} train fields, "
-          f"{args.n_envs} envs, device={model.device}, obs={obs_cfg}, env={env_kwargs}")
+          f"{args.n_envs} envs, device={model.device}, obs={obs_cfg}, env={train_kwargs}")
     print(model.policy)
 
     callbacks = [

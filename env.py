@@ -43,12 +43,18 @@ class ShipEnv(gym.Env):
         target_w=1.0,
         goal_bonus=10.0,
         oob_penalty=10.0,
+        curriculum=None,
     ):
         """
         wind         : WindField, or a legacy dict with keys x, y, Intensity, Direction
         wind_sampler : optional callable(np_random) -> WindField, resampled at each reset
                        (used to train wind-aware policies on a distribution of fields)
         spawn_box    : start and goal are sampled uniformly in this square
+        curriculum   : optional (initial_radius, success_threshold, shrink_factor, window).
+                       The goal radius starts at initial_radius and is multiplied by
+                       shrink_factor whenever the success rate over the last `window`
+                       episodes exceeds success_threshold, until it reaches goal_radius.
+                       Self-contained per environment, so it works inside SubprocVecEnv.
         """
         super().__init__()
         if isinstance(wind, dict):
@@ -65,6 +71,11 @@ class ShipEnv(gym.Env):
         self.target_w = target_w
         self.goal_bonus = goal_bonus
         self.oob_penalty = oob_penalty
+        self.curriculum = curriculum
+        self.current_radius = goal_radius
+        self._recent = []
+        if curriculum is not None:
+            self.current_radius = max(float(curriculum[0]), goal_radius)
 
         self.action_space = spaces.Box(
             low=-self.p.u_max, high=self.p.u_max, shape=(2,), dtype=np.float32
@@ -101,6 +112,7 @@ class ShipEnv(gym.Env):
             "dist": self.dist_to_goal(),
             "success": False,
             "oob": False,
+            "goal_radius": self.current_radius,
         }
         info.update(extra)
         return info
@@ -155,7 +167,7 @@ class ShipEnv(gym.Env):
         terminated = False
         success = False
         oob = False
-        if d <= self.goal_radius:
+        if d <= self.current_radius:
             terminated = True
             success = True
             reward += self.goal_bonus
@@ -164,9 +176,22 @@ class ShipEnv(gym.Env):
             oob = True
             reward -= self.oob_penalty
         truncated = (not terminated) and self.steps >= self.max_steps
+        if (terminated or truncated) and self.curriculum is not None:
+            self._update_curriculum(success)
 
         info = self._info(success=success, oob=oob, stage_cost=cost, wind=(float(wx), float(wy)))
         return self._obs(), float(reward), terminated, truncated, info
+
+
+    def _update_curriculum(self, success):
+        _, threshold, shrink, window = self.curriculum
+        self._recent.append(bool(success))
+        if len(self._recent) < window:
+            return
+        rate = float(np.mean(self._recent[-window:]))
+        if rate >= threshold and self.current_radius > self.goal_radius:
+            self.current_radius = max(self.goal_radius, self.current_radius * shrink)
+            self._recent = []
 
 
 # Backwards-compatible name used by the legacy scripts: CustomEnv(DICT)

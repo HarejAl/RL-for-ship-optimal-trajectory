@@ -202,3 +202,23 @@ def test_cnn_extractor_forward():
     batch = {k: torch.as_tensor(v)[None] for k, v in obs.items()}
     out = ext(batch)
     assert out.shape == (1, ext.features_dim) and ext.features_dim == 64 * 3
+
+
+def test_goal_radius_curriculum_shrinks_with_success():
+    env = ShipEnv(uniform_wind_field(), goal_radius=0.25, curriculum=(1.0, 0.5, 0.5, 4))
+    assert env.current_radius == 1.0
+    for _ in range(4):  # four successes in a row -> shrink
+        env.reset(seed=0, options=dict(start=(2.0, 2.0), goal=(2.0, 4.0)))
+        for _ in range(600):
+            _, _, term, trunc, info = env.step(np.array([0.0, 10.0]))
+            if term or trunc:
+                break
+        assert info["success"]
+    assert env.current_radius == 0.5
+    for _ in range(8):
+        env.reset(seed=0, options=dict(start=(2.0, 2.0), goal=(2.0, 4.0)))
+        for _ in range(600):
+            _, _, term, trunc, info = env.step(np.array([0.0, 10.0]))
+            if term or trunc:
+                break
+    assert env.current_radius == 0.25  # never below goal_radius
