@@ -66,6 +66,11 @@ def parse_args():
     ap.add_argument("--device", default="auto")
     ap.add_argument("--tag", default=None)
     ap.add_argument("--resume", default=None, help="path to a model .zip to continue training")
+    ap.add_argument("--demo-data", default=None,
+                    help="dp_teacher.npz: pre-fill the replay buffer with the DP rollout transitions")
+    ap.add_argument("--critic-warmup", type=int, default=0,
+                    help="gradient steps during which the actor is frozen (critic learns first); "
+                         "use together with --resume from a behaviour-cloned model")
     return ap.parse_args()
 
 
@@ -83,6 +88,81 @@ def _env_factory(n_fields, seed_base, obs_cfg, env_kwargs, fixed_wind=None, plai
         env = ShipEnv(wind, wind_sampler=None if pool is None else pool.sampler, **env_kwargs)
         return Monitor(env, info_keywords=("success", "J", "t", "goal_radius"))
     return make_wind_env(pool=pool, wind=wind, obs_cfg=obs_cfg, env_kwargs=env_kwargs)
+
+
+def prefill_replay_buffer(model, data_path, obs_cfg, env_kwargs, n_envs):
+    """Insert the DP rollout transitions of dp_teacher.npz into the model's replay buffer.
+    Observations are rebuilt with the same wrapper; actions are stored scaled to [-1, 1]
+    as SB3 does; rewards are the ones the env returned during the DP rollouts."""
+    from env import ShipEnv
+    from wind import generate_wind_field
+    from wind_obs import wrap_wind_obs
+    d = np.load(data_path)
+    rows = np.where(d["source"] == 0)[0]
+    u_max = float(model.action_space.high[0])
+    obs_l, nobs_l, act_l, rew_l, done_l = [], [], [], [], []
+    for seed in np.unique(d["field_seed"][rows]):
+        r = rows[d["field_seed"][rows] == seed]
+        base = ShipEnv(generate_wind_field(int(seed)), **env_kwargs)
+        wrapper = wrap_wind_obs(base, obs_cfg)
+        # walk down to the WindObsWrapper (may be under FlattenObservation)
+        obs_fn = wrapper.observation
+        for i in r:
+            base.goal = d["goal"][i].astype(np.float64)
+            base.state = d["state"][i].astype(np.float64)
+            obs_l.append(obs_fn(None))
+            base.state = d["next_state"][i].astype(np.float64)
+            nobs_l.append(obs_fn(None))
+            act_l.append(d["action"][i] / u_max)
+            rew_l.append(d["reward"][i])
+            done_l.append(d["terminated"][i])
+    n = (len(obs_l) // n_envs) * n_envs
+    keys = obs_l[0].keys() if isinstance(obs_l[0], dict) else None
+    for s in range(0, n, n_envs):
+        if keys:
+            o = {k: np.stack([obs_l[j][k] for j in range(s, s + n_envs)]) for k in keys}
+            no = {k: np.stack([nobs_l[j][k] for j in range(s, s + n_envs)]) for k in keys}
+        else:
+            o = np.stack(obs_l[s:s + n_envs])
+            no = np.stack(nobs_l[s:s + n_envs])
+        model.replay_buffer.add(o, no, np.stack(act_l[s:s + n_envs]).astype(np.float32),
+                                np.array(rew_l[s:s + n_envs], dtype=np.float32),
+                                np.array(done_l[s:s + n_envs]), [{} for _ in range(n_envs)])
+    return n
+
+
+def _make_actor_freeze_callback():
+    from stable_baselines3.common.callbacks import BaseCallback
+
+    class ActorFreezeCallback(BaseCallback):
+        """Zero the actor learning rate for the first `n_updates` gradient steps."""
+
+        def __init__(self, n_updates):
+            super().__init__()
+            self.n_updates = n_updates
+            self._lr = None
+            self.released = False
+
+        def _on_training_start(self):
+            opt = self.model.actor.optimizer
+            self._lr = [g["lr"] for g in opt.param_groups]
+            for g in opt.param_groups:
+                g["lr"] = 0.0
+            print(f"[warmup] actor frozen for the first {self.n_updates} gradient steps")
+
+        def _on_step(self):
+            if not self.released and self.model._n_updates >= self.n_updates:
+                for g, lr in zip(self.model.actor.optimizer.param_groups, self._lr):
+                    g["lr"] = lr
+                self.released = True
+                print(f"[warmup] actor released at {self.num_timesteps} env steps "
+                      f"({self.model._n_updates} gradient steps)")
+            return True
+
+    return ActorFreezeCallback
+
+
+ActorFreezeCallback = _make_actor_freeze_callback()
 
 
 def main():
@@ -155,13 +235,20 @@ def main():
     else:
         model = SAC(ent_coef="auto", **common)
 
+    if args.demo_data:
+        n_demo = prefill_replay_buffer(model, args.demo_data, obs_cfg, env_kwargs, args.n_envs)
+        print(f"replay buffer pre-filled with {n_demo:,} DP demonstration transitions")
+
     model.set_logger(configure(log_dir, ["stdout", "csv"]))
     print(f"[{tag}] {args.algo.upper()} on {'ONE field (' + str(args.fixed_wind) + ')' if args.fixed_wind else str(args.n_train_fields) + ' train fields'}, "
           f"{args.n_envs} envs, device={model.device}, obs={'plain' if plain else obs_cfg}, "
           f"obs_dim={train_env.observation_space}, env={train_kwargs}")
     print(model.policy)
 
-    callbacks = [
+    callbacks = []
+    if args.critic_warmup > 0:
+        callbacks.append(ActorFreezeCallback(args.critic_warmup))
+    callbacks += [
         EvalCallback(eval_env, best_model_save_path=None, log_path=log_dir,
                      eval_freq=max(args.eval_every // args.n_envs, 1),
                      n_eval_episodes=args.eval_episodes, deterministic=True, verbose=1),
@@ -169,8 +256,9 @@ def main():
                            name_prefix="ckpt", verbose=0),
     ]
     # EvalCallback saves best_model.zip into best_model_save_path; keep it next to the final model
-    callbacks[0].best_model_save_path = os.path.join(MODEL_DIR, f"{tag}_best")
-    os.makedirs(callbacks[0].best_model_save_path, exist_ok=True)
+    eval_cb = [c for c in callbacks if isinstance(c, EvalCallback)][0]
+    eval_cb.best_model_save_path = os.path.join(MODEL_DIR, f"{tag}_best")
+    os.makedirs(eval_cb.best_model_save_path, exist_ok=True)
 
     model.learn(total_timesteps=args.timesteps, callback=callbacks, progress_bar=False,
                 reset_num_timesteps=args.resume is None)
