@@ -68,6 +68,11 @@ def parse_args():
     ap.add_argument("--resume", default=None, help="path to a model .zip to continue training")
     ap.add_argument("--demo-data", default=None,
                     help="dp_teacher.npz: pre-fill the replay buffer with the DP rollout transitions")
+    ap.add_argument("--bc-weight", type=float, default=0.0,
+                    help="TD3+BC: weight of the behaviour-cloning MSE on demonstration samples in the actor "
+                         "loss (0 = plain TD3). Requires --demo-data.")
+    ap.add_argument("--bc-alpha", type=float, default=2.5,
+                    help="TD3+BC: the Q term is scaled by alpha / mean|Q| (Fujimoto & Gu 2021)")
     ap.add_argument("--critic-warmup", type=int, default=0,
                     help="gradient steps during which the actor is frozen (critic learns first); "
                          "use together with --resume from a behaviour-cloned model")
@@ -120,6 +125,12 @@ def prefill_replay_buffer(model, data_path, obs_cfg, env_kwargs, n_envs):
             done_l.append(d["terminated"][i])
     n = (len(obs_l) // n_envs) * n_envs
     keys = obs_l[0].keys() if isinstance(obs_l[0], dict) else None
+    if hasattr(model, "set_demonstrations"):
+        if keys:
+            demo_obs = {k: np.stack([o[k] for o in obs_l]) for k in keys}
+        else:
+            demo_obs = np.stack(obs_l)
+        model.set_demonstrations(demo_obs, np.stack(act_l).astype(np.float32))
     for s in range(0, n, n_envs):
         if keys:
             o = {k: np.stack([obs_l[j][k] for j in range(s, s + n_envs)]) for k in keys}
@@ -131,6 +142,94 @@ def prefill_replay_buffer(model, data_path, obs_cfg, env_kwargs, n_envs):
                                 np.array(rew_l[s:s + n_envs], dtype=np.float32),
                                 np.array(done_l[s:s + n_envs]), [{} for _ in range(n_envs)])
     return n
+
+
+def _make_td3bc_class():
+    import torch as th
+    import torch.nn.functional as F
+    from stable_baselines3 import TD3
+    from stable_baselines3.common.utils import polyak_update
+
+    class TD3BC(TD3):
+        """
+        TD3 whose actor loss adds a behaviour-cloning MSE on demonstration samples:
+            L = -alpha / mean|Q| * Q(s, pi(s))  +  bc_weight * ||pi(s_demo) - a_demo||^2
+        (Fujimoto & Gu, "A Minimalist Approach to Offline RL", 2021), used here for online
+        fine-tuning of a cloned policy so the policy gradient cannot erase the expert before
+        the critic is accurate. Demonstrations are set with `set_demonstrations`.
+        """
+
+        bc_weight = 1.0
+        bc_alpha = 2.5
+
+        def set_demonstrations(self, demo_obs, demo_actions):
+            dev = self.device
+            if isinstance(demo_obs, dict):
+                self._demo_obs = {k: th.as_tensor(v, device=dev) for k, v in demo_obs.items()}
+            else:
+                self._demo_obs = th.as_tensor(demo_obs, device=dev)
+            self._demo_act = th.as_tensor(demo_actions, device=dev)
+            self._n_demo = len(self._demo_act)
+
+        def _demo_batch(self, batch_size):
+            i = th.randint(0, self._n_demo, (batch_size,), device=self.device)
+            if isinstance(self._demo_obs, dict):
+                return {k: v[i] for k, v in self._demo_obs.items()}, self._demo_act[i]
+            return self._demo_obs[i], self._demo_act[i]
+
+        def train(self, gradient_steps, batch_size=100):
+            self.policy.set_training_mode(True)
+            self._update_learning_rate([self.actor.optimizer, self.critic.optimizer])
+            actor_losses, critic_losses, bc_losses = [], [], []
+            for _ in range(gradient_steps):
+                self._n_updates += 1
+                replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)
+                with th.no_grad():
+                    noise = replay_data.actions.clone().data.normal_(0, self.target_policy_noise)
+                    noise = noise.clamp(-self.target_noise_clip, self.target_noise_clip)
+                    next_actions = (self.actor_target(replay_data.next_observations) + noise).clamp(-1, 1)
+                    next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
+                    next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
+                    target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
+                current_q_values = self.critic(replay_data.observations, replay_data.actions)
+                critic_loss = sum(F.mse_loss(current_q, target_q_values) for current_q in current_q_values)
+                critic_losses.append(critic_loss.item())
+                self.critic.optimizer.zero_grad()
+                critic_loss.backward()
+                self.critic.optimizer.step()
+
+                if self._n_updates % self.policy_delay == 0:
+                    q = self.critic.q1_forward(replay_data.observations, self.actor(replay_data.observations))
+                    lmbda = self.bc_alpha / q.abs().mean().detach().clamp_min(1e-6)
+                    actor_loss = -lmbda * q.mean()
+                    if self.bc_weight > 0 and getattr(self, "_n_demo", 0) > 0:
+                        d_obs, d_act = self._demo_batch(batch_size)
+                        bc = F.mse_loss(self.actor(d_obs), d_act)
+                        actor_loss = actor_loss + self.bc_weight * bc
+                        bc_losses.append(bc.item())
+                    actor_losses.append(actor_loss.item())
+                    self.actor.optimizer.zero_grad()
+                    actor_loss.backward()
+                    self.actor.optimizer.step()
+                    polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
+                    polyak_update(self.actor.parameters(), self.actor_target.parameters(), self.tau)
+                    polyak_update(self.critic_batch_norm_stats, self.critic_batch_norm_stats_target, 1.0)
+                    polyak_update(self.actor_batch_norm_stats, self.actor_batch_norm_stats_target, 1.0)
+
+            self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
+            if actor_losses:
+                self.logger.record("train/actor_loss", np.mean(actor_losses))
+            if bc_losses:
+                self.logger.record("train/bc_loss", np.mean(bc_losses))
+            self.logger.record("train/critic_loss", np.mean(critic_losses))
+
+        def _excluded_save_params(self):
+            return super()._excluded_save_params() + ["_demo_obs", "_demo_act", "_n_demo"]
+
+    return TD3BC
+
+
+TD3BC = _make_td3bc_class()
 
 
 def _make_actor_freeze_callback():
@@ -226,6 +325,10 @@ def main():
     )
     if args.resume:
         Algo = TD3 if args.algo == "td3" else SAC
+        if args.bc_weight > 0:
+            if not args.demo_data:
+                raise SystemExit("--bc-weight requires --demo-data")
+            Algo = TD3BC
         # a behaviour-cloned model was saved with placeholder RL hyper-parameters (tiny buffer,
         # no exploration noise): override them with this run's settings on load
         overrides = dict(learning_rate=args.lr, buffer_size=args.buffer_size, batch_size=args.batch_size,
@@ -236,8 +339,11 @@ def main():
             n_act = train_env.action_space.shape[-1]
             sigma = args.action_noise / float(train_env.action_space.high[0])
             model.action_noise = NormalActionNoise(mean=np.zeros(n_act), sigma=sigma * np.ones(n_act))
+        if args.bc_weight > 0:
+            model.bc_weight = args.bc_weight
+            model.bc_alpha = args.bc_alpha
         print(f"resumed from {args.resume} with lr={args.lr}, buffer={args.buffer_size}, "
-              f"noise={args.action_noise}")
+              f"noise={args.action_noise}, algo={type(model).__name__}, bc_weight={args.bc_weight}")
     elif args.algo == "td3":
         n_act = train_env.action_space.shape[-1]
         u_max = float(train_env.action_space.high[0])
