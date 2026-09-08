@@ -180,6 +180,8 @@ class ShipEnv(gym.Env):
             self._update_curriculum(success)
 
         info = self._info(success=success, oob=oob, stage_cost=cost, wind=(float(wx), float(wy)))
+        if terminated or truncated:
+            info["is_success"] = success  # picked up by the SB3 logger as rollout/success_rate
         return self._obs(), float(reward), terminated, truncated, info
 
 
