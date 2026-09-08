@@ -11,7 +11,7 @@ with the greedy DP action and the cost-to-go V(s).
     python dp_dataset.py --n-fields 150 --goals-per-field 2 --rollouts 20 --random-states 1500
 
 Output: data/dp_teacher.npz with arrays
-    field_seed (N,)  goal (N,2)  state (N,4)  action (N,2)  value (N,)  source (N,) 0=rollout 1=random
+    field_seed (N,)  goal (N,2)  state (N,4)  action (N,2)  value (N,)  source (N,) 0=DP rollout 1=random 2=DAgger rollout
     and, for rollout samples only (source==0), the transition
     next_state (N,4)  reward (N,)  terminated (N,)   (NaN / 0 for random samples)
 The file is rewritten after every field so a partial run is usable.
@@ -52,7 +52,34 @@ def parse_args():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default=None)
     ap.add_argument("--out", default=os.path.join(DATA_DIR, "dp_teacher.npz"))
+    ap.add_argument("--rollout-policy", default=None,
+                    help="DAgger: roll out this SB3 model (wind-aware) instead of the DP policy and label the "
+                         "visited states with the DP action; the transition fields are then NOT expert transitions")
+    ap.add_argument("--rollout-noise", type=float, default=0.0,
+                    help="std (action units) of Gaussian noise added to the rolled-out policy (DAgger diversity)")
     return ap.parse_args()
+
+
+def policy_rollout(model, env, start, goal, wind, rng, noise_std=0.0):
+    """Roll out an SB3 policy (optionally with Gaussian action noise); same return format as planner.rollout."""
+    base = env.unwrapped
+    obs, info = env.reset(options=dict(start=start, goal=goal, wind=wind))
+    traj, actions, rewards = [base.state.copy()], [], []
+    terminated = truncated = False
+    u_max = base.p.u_max
+    for _ in range(base.max_steps):
+        a, _ = model.predict(obs, deterministic=True)
+        if noise_std > 0:
+            a = np.clip(a + rng.normal(0.0, noise_std, size=a.shape), -u_max, u_max)
+        obs, r, terminated, truncated, info = env.step(a)
+        traj.append(base.state.copy())
+        actions.append(np.asarray(a, dtype=np.float64))
+        rewards.append(r)
+        if terminated or truncated:
+            break
+    return dict(J=info["J"], t=info["t"], success=info["success"], oob=info["oob"], steps=len(actions),
+                terminated=bool(terminated), traj=np.array(traj), actions=np.array(actions),
+                rewards=np.array(rewards))
 
 
 def main():
@@ -60,6 +87,11 @@ def main():
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     params = ShipParams()
     rng = np.random.default_rng(args.seed)
+    policy, obs_cfg = None, None
+    if args.rollout_policy:
+        from benchmark_dp import load_model
+        policy, obs_cfg = load_model(args.rollout_policy)
+        print(f"DAgger mode: rolling out {args.rollout_policy} (obs_cfg={obs_cfg}), labelling with DP")
     cols = {k: [] for k in ("field_seed", "goal", "state", "action", "value", "source",
                             "next_state", "reward", "terminated")}
     t_start = time.perf_counter()
@@ -71,6 +103,10 @@ def main():
         wind = generate_wind_field(seed)
         env = ShipEnv(wind, params=params, goal_bonus=args.goal_bonus, oob_penalty=args.oob_penalty)
         xmin, xmax, ymin, ymax = wind.extent
+        rl_env = env
+        if policy is not None and obs_cfg is not None:
+            from wind_obs import wrap_wind_obs
+            rl_env = wrap_wind_obs(env, obs_cfg)
         for g in range(args.goals_per_field):
             goal = rng.uniform(*env.spawn_box, size=2)
             planner = ValueIterationPlanner(wind, goal, params=params, nx=args.nx, ny=args.ny, nv=args.nv,
@@ -85,16 +121,23 @@ def main():
                 start = rng.uniform(*env.spawn_box, size=2)
                 while np.linalg.norm(start - goal) < env.min_start_goal_dist:
                     start = rng.uniform(*env.spawn_box, size=2)
-                res = planner.rollout(env, start)
+                if policy is None:
+                    res = planner.rollout(env, start)
+                    labels = res["actions"]
+                else:
+                    res = policy_rollout(policy, rl_env, start, goal, wind, rng, args.rollout_noise)
+                    labels, _ = planner.act_batch(res["traj"][:-1])
                 n_ok += int(res["success"])
                 T = res["steps"]
                 st = res["traj"][:-1]
                 cols["field_seed"].append(np.full(T, seed))
                 cols["goal"].append(np.tile(goal, (T, 1)))
                 cols["state"].append(st)
-                cols["action"].append(res["actions"])
+                cols["action"].append(labels)
                 cols["value"].append(planner.value(st[:, 0], st[:, 1], st[:, 2], st[:, 3]))
-                cols["source"].append(np.zeros(T, dtype=np.int8))
+                # source 0 = expert (DP) rollout transitions; 2 = DAgger rollouts of a learner policy
+                # (labels are DP actions but the transitions follow the learner, so not demo transitions)
+                cols["source"].append(np.full(T, 0 if policy is None else 2, dtype=np.int8))
                 cols["next_state"].append(res["traj"][1:])
                 cols["reward"].append(res["rewards"])
                 term = np.zeros(T, dtype=bool)
