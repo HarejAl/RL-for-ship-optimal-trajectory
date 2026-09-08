@@ -175,9 +175,38 @@ def _make_extractor_class():
 WindCNNExtractor = _make_extractor_class()
 
 
+class WindStencilWrapper(gym.ObservationWrapper):
+    """
+    Minimal wind-aware observation for an MLP: the 6-vector plus the wind (scaled) sampled
+    on an n x n stencil of spacing `spacing` centred on the ship (absolute frame).
+    obs dim = 6 + 2 * n * n.
+    """
+
+    def __init__(self, env, n=3, spacing=1.0):
+        super().__init__(env)
+        self.n = int(n)
+        self.spacing = float(spacing)
+        off = (np.arange(self.n) - (self.n - 1) / 2) * self.spacing
+        self._ox, self._oy = np.meshgrid(off, off, indexing="ij")
+        self.observation_space = spaces.Box(-np.inf, np.inf, shape=(6 + 2 * self.n * self.n,), dtype=np.float32)
+
+    def observation(self, obs):
+        base = self.env.unwrapped
+        x, y, vx, vy = base.state
+        gx, gy = base.goal
+        vec = np.array([(gx - x) / POS_SCALE, (gy - y) / POS_SCALE,
+                        vx / VEL_SCALE, vy / VEL_SCALE, x / POS_SCALE, y / POS_SCALE], dtype=np.float32)
+        wx, wy = base.wind(x + self._ox, y + self._oy)
+        return np.concatenate((vec, (wx / WIND_SCALE).ravel(), (wy / WIND_SCALE).ravel())).astype(np.float32)
+
+
 def wrap_wind_obs(base_env, obs_cfg):
-    """Apply WindObsWrapper (and FlattenObservation if obs_cfg['flatten']) to a ShipEnv."""
+    """Apply the observation wrapper described by obs_cfg to a ShipEnv:
+    {'stencil': n, 'spacing': s}  -> WindStencilWrapper (flat, for MlpPolicy)
+    otherwise WindObsWrapper(**cfg), plus FlattenObservation if cfg['flatten']."""
     cfg = dict(obs_cfg or {})
+    if cfg.get("stencil"):
+        return WindStencilWrapper(base_env, n=cfg["stencil"], spacing=cfg.get("spacing", 1.0))
     flatten = cfg.pop("flatten", False)
     env = WindObsWrapper(base_env, **cfg)
     if flatten:

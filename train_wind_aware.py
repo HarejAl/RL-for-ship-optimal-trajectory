@@ -54,9 +54,12 @@ def parse_args():
     ap.add_argument("--local-res", type=int, default=16)
     ap.add_argument("--global-res", type=int, default=16)
     ap.add_argument("--no-global", action="store_true")
-    ap.add_argument("--obs", choices=["wind", "plain", "flat"], default="wind",
+    ap.add_argument("--obs", choices=["wind", "plain", "flat", "stencil"], default="wind",
                     help="wind: Dict obs with CNN maps; flat: the same maps flattened into one vector for an MLP; "
-                         "plain: 6-vector obs with an MLP (wind-blind control)")
+                         "plain: 6-vector obs with an MLP (wind-blind control); "
+                         "stencil: 6-vector + wind on a small stencil around the ship (MLP)")
+    ap.add_argument("--stencil-n", type=int, default=3)
+    ap.add_argument("--stencil-spacing", type=float, default=1.0)
     ap.add_argument("--fixed-wind", default=None,
                     help="train and validate on ONE field: 'legacy' (WF.pkl) or an integer generator seed")
     ap.add_argument("--seed", type=int, default=0)
@@ -100,6 +103,8 @@ def main():
                    global_res=args.global_res, use_global=not args.no_global)
     if args.obs == "flat":
         obs_cfg["flatten"] = True
+    if args.obs == "stencil":
+        obs_cfg = dict(stencil=args.stencil_n, spacing=args.stencil_spacing)
     from wind_obs import WindObsWrapper
     WindObsWrapper.save_config(os.path.join(MODEL_DIR, f"{tag}.json"), obs_cfg)
 
@@ -121,7 +126,8 @@ def main():
         n_envs=1, seed=args.seed + 12345, vec_env_cls=DummyVecEnv,
     )
 
-    if plain or args.obs == "flat":
+    mlp = plain or args.obs in ("flat", "stencil")
+    if mlp:
         policy_kwargs = dict(net_arch=dict(pi=[256, 256], qf=[256, 256]))
     else:
         policy_kwargs = dict(
@@ -131,7 +137,7 @@ def main():
             share_features_extractor=False,
         )
     common = dict(
-        policy="MlpPolicy" if (plain or args.obs == "flat") else "MultiInputPolicy", env=train_env, learning_rate=args.lr, gamma=args.gamma,
+        policy="MlpPolicy" if mlp else "MultiInputPolicy", env=train_env, learning_rate=args.lr, gamma=args.gamma,
         buffer_size=args.buffer_size, batch_size=args.batch_size, learning_starts=args.learning_starts,
         train_freq=1, gradient_steps=args.gradient_steps, policy_kwargs=policy_kwargs,
         seed=args.seed, device=args.device, verbose=0,
