@@ -20,6 +20,9 @@ loop, amortising the cost of re-solving the routing problem each time the foreca
 | `dp_baseline.py` | `ValueIterationPlanner`: semi-Lagrangian value iteration on a 4D `(x, y, vx, vy)` grid, torch/GPU vectorised, greedy policy rollout in the environment. |
 | `run_dp_baseline.py` | Solve one case, print cost, time and solve statistics, save a figure to `output/`. |
 | `benchmark_dp.py` | Solve many cases; optionally roll out a stable-baselines3 model on the same cases and report the optimality gap. |
+| `wind_obs.py` | Wind-aware observations: `WindObsWrapper` (state vector + ego-centric wind crop + coarse global map), `WindFieldPool`, `WindCNNExtractor` for SB3. |
+| `train_wind_aware.py` | Train TD3 or SAC with the CNN extractor on a pool of generated fields, validating on held-out fields. |
+| `compare_policy.py` | Plot DP and RL trajectories side by side on held-out cases. |
 | `tests/test_core.py` | Unit and sanity tests (interpolation, dynamics, environment, DP on zero wind and uniform wind). |
 | `legacy/` | The original single-field TD3 code (`env.py`, `main.py`). `trained_model.zip` was trained with this legacy environment and is **not** compatible with the new dynamics. |
 | `WF.pkl` | The original precomputed wind field (speed and direction). |
@@ -69,6 +72,24 @@ wall-clock time is the quantity an amortised learned policy is compared against.
 
 ---
 
+## Wind-aware policy
+
+The policy observes a Dict:
+
+| Key | Shape | Content |
+| --- | --- | --- |
+| `vec` | (6,) | goal offset, velocity, absolute position, all scaled to O(1) |
+| `local` | (3, 16, 16) | ego-centric crop of half-width 2 units: `wx`, `wy`, inside-domain mask |
+| `global` | (4, 16, 16) | whole field downsampled: `wx`, `wy`, gaussian blob at the ship, blob at the goal |
+
+A small CNN per map plus an MLP for the vector feed a TD3 (or SAC) actor-critic. Training
+samples a new field from a pool of 200 generated fields at every reset. Seed namespaces are
+disjoint: training fields use seeds from 1,000,000, validation from 2,000,000, and the
+benchmark cases in `benchmark_dp.py` use seeds below 10,000, so evaluation is always on
+unseen fields.
+
+---
+
 ## Usage
 
 ```bash
@@ -78,7 +99,13 @@ python run_dp_baseline.py                           # legacy field, seeded start
 python run_dp_baseline.py --wind random --seed 7    # generated field
 python benchmark_dp.py --n-cases 20 --wind random   # many cases, CSV in output/
 python benchmark_dp.py --n-cases 20 --model path/to/model.zip   # add RL optimality gap
+python train_wind_aware.py --timesteps 1000000 --n-envs 8 --gradient-steps 4 --tag td3_v1
+python benchmark_dp.py --n-cases 50 --model models/td3_v1_best/best_model.zip
+python compare_policy.py --model models/td3_v1_best/best_model.zip --seeds 0 1 2 3
 ```
+
+Trained models go to `models/` (git-ignored) with a `.json` sidecar describing the
+observation wrapper, and logs to `output/logs/<tag>/`.
 
 The legacy demo still runs with `python legacy/main.py`.
 
@@ -87,7 +114,7 @@ The legacy demo still runs with `python legacy/main.py`.
 ## Roadmap
 
 1. Done: physically consistent dynamics, seeded environment, wind-field generator, DP baseline and benchmark harness.
-2. Wind-aware policy: CNN encoder over an ego-centric crop of the wind field, trained on random fields, evaluated on held-out fields against the DP baseline.
+2. Done (code): wind-aware policy with a CNN over the local crop and the global map, trained on random fields, evaluated on held-out fields against the DP baseline. Training runs and results in progress.
 3. Preference-conditioned policy: the cost weight ratio as an input, giving the whole fast-to-economical Pareto front from one network.
 4. Time-varying wind: receding-horizon execution where the field is swapped at each forecast step, compared with re-solved DP.
 5. Real forecast data (for example ERA5 10 m wind) and a 3-DOF ship model.
