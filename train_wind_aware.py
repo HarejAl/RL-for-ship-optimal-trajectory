@@ -97,7 +97,9 @@ def prefill_replay_buffer(model, data_path, obs_cfg, env_kwargs, n_envs):
     from env import ShipEnv
     from wind import generate_wind_field
     from wind_obs import wrap_wind_obs
-    d = np.load(data_path)
+    with np.load(data_path) as f:  # materialise once: NpzFile re-decompresses on every access
+        d = {k: f[k] for k in ("field_seed", "goal", "state", "next_state", "action", "reward",
+                               "terminated", "source")}
     rows = np.where(d["source"] == 0)[0]
     u_max = float(model.action_space.high[0])
     obs_l, nobs_l, act_l, rew_l, done_l = [], [], [], [], []
