@@ -1,0 +1,142 @@
+"""
+Train a wind-aware policy (CNN over the wind map) on a pool of generated wind fields.
+
+    python train_wind_aware.py --timesteps 1000000 --n-envs 8 --tag td3_v1
+    python train_wind_aware.py --algo sac --timesteps 500000 --tag sac_v1
+
+Outputs
+    models/<tag>.zip           final model
+    models/<tag>_best.zip      best model on the validation fields (EvalCallback)
+    models/<tag>.json          observation-wrapper config (needed to rebuild the env)
+    output/logs/<tag>/         SB3 CSV/stdout logs and evaluations.npz
+"""
+
+import argparse
+import functools
+import os
+
+import numpy as np
+import torch
+
+from wind_obs import (WindFieldPool, WindCNNExtractor, make_wind_env,
+                      TRAIN_SEED_BASE, EVAL_SEED_BASE)
+
+# Anchor all paths to this script's location
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_DIR = os.path.join(SCRIPT_DIR, "models")
+LOG_DIR = os.path.join(SCRIPT_DIR, "output", "logs")
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--algo", choices=["td3", "sac"], default="td3")
+    ap.add_argument("--timesteps", type=int, default=1_000_000)
+    ap.add_argument("--n-envs", type=int, default=8)
+    ap.add_argument("--n-train-fields", type=int, default=200)
+    ap.add_argument("--n-eval-fields", type=int, default=20)
+    ap.add_argument("--eval-every", type=int, default=25_000, help="env steps (per env) between evaluations")
+    ap.add_argument("--eval-episodes", type=int, default=20)
+    ap.add_argument("--buffer-size", type=int, default=300_000)
+    ap.add_argument("--batch-size", type=int, default=256)
+    ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--gamma", type=float, default=0.99)
+    ap.add_argument("--learning-starts", type=int, default=10_000)
+    ap.add_argument("--gradient-steps", type=int, default=-1, help="-1: one per collected transition")
+    ap.add_argument("--action-noise", type=float, default=2.0, help="TD3 exploration noise std (action units)")
+    ap.add_argument("--local-size", type=float, default=2.0)
+    ap.add_argument("--local-res", type=int, default=16)
+    ap.add_argument("--global-res", type=int, default=16)
+    ap.add_argument("--no-global", action="store_true")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--device", default="auto")
+    ap.add_argument("--tag", default=None)
+    ap.add_argument("--resume", default=None, help="path to a model .zip to continue training")
+    return ap.parse_args()
+
+
+def _env_factory(n_fields, seed_base, obs_cfg):
+    pool = WindFieldPool(n_fields, seed_base=seed_base)
+    return make_wind_env(pool=pool, obs_cfg=obs_cfg)
+
+
+def main():
+    args = parse_args()
+    tag = args.tag or f"{args.algo}_s{args.seed}"
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    log_dir = os.path.join(LOG_DIR, tag)
+    os.makedirs(log_dir, exist_ok=True)
+
+    from stable_baselines3 import TD3, SAC
+    from stable_baselines3.common.env_util import make_vec_env
+    from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv
+    from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
+    from stable_baselines3.common.noise import NormalActionNoise
+    from stable_baselines3.common.logger import configure
+
+    obs_cfg = dict(local_size=args.local_size, local_res=args.local_res,
+                   global_res=args.global_res, use_global=not args.no_global)
+    from wind_obs import WindObsWrapper
+    WindObsWrapper.save_config(os.path.join(MODEL_DIR, f"{tag}.json"), obs_cfg)
+
+    vec_cls = SubprocVecEnv if args.n_envs > 1 else DummyVecEnv
+    train_env = make_vec_env(
+        functools.partial(_env_factory, args.n_train_fields, TRAIN_SEED_BASE, obs_cfg),
+        n_envs=args.n_envs, seed=args.seed, vec_env_cls=vec_cls,
+    )
+    eval_env = make_vec_env(
+        functools.partial(_env_factory, args.n_eval_fields, EVAL_SEED_BASE, obs_cfg),
+        n_envs=1, seed=args.seed + 12345, vec_env_cls=DummyVecEnv,
+    )
+
+    policy_kwargs = dict(
+        features_extractor_class=WindCNNExtractor,
+        features_extractor_kwargs=dict(map_features=64, vec_features=64),
+        net_arch=dict(pi=[256, 256], qf=[256, 256]),
+        share_features_extractor=False,
+    )
+    common = dict(
+        policy="MultiInputPolicy", env=train_env, learning_rate=args.lr, gamma=args.gamma,
+        buffer_size=args.buffer_size, batch_size=args.batch_size, learning_starts=args.learning_starts,
+        train_freq=1, gradient_steps=args.gradient_steps, policy_kwargs=policy_kwargs,
+        seed=args.seed, device=args.device, verbose=0,
+    )
+    if args.resume:
+        Algo = TD3 if args.algo == "td3" else SAC
+        model = Algo.load(args.resume, env=train_env, device=args.device)
+        print(f"resumed from {args.resume}")
+    elif args.algo == "td3":
+        n_act = train_env.action_space.shape[-1]
+        noise = NormalActionNoise(mean=np.zeros(n_act), sigma=args.action_noise * np.ones(n_act))
+        model = TD3(action_noise=noise, **common)
+    else:
+        model = SAC(ent_coef="auto", **common)
+
+    model.set_logger(configure(log_dir, ["stdout", "csv"]))
+    print(f"[{tag}] {args.algo.upper()} on {args.n_train_fields} train fields, "
+          f"{args.n_envs} envs, device={model.device}, obs={obs_cfg}")
+    print(model.policy)
+
+    callbacks = [
+        EvalCallback(eval_env, best_model_save_path=None, log_path=log_dir,
+                     eval_freq=max(args.eval_every // args.n_envs, 1),
+                     n_eval_episodes=args.eval_episodes, deterministic=True, verbose=1),
+        CheckpointCallback(save_freq=max(100_000 // args.n_envs, 1), save_path=log_dir,
+                           name_prefix="ckpt", verbose=0),
+    ]
+    # EvalCallback saves best_model.zip into best_model_save_path; keep it next to the final model
+    callbacks[0].best_model_save_path = os.path.join(MODEL_DIR, f"{tag}_best")
+    os.makedirs(callbacks[0].best_model_save_path, exist_ok=True)
+
+    model.learn(total_timesteps=args.timesteps, callback=callbacks, progress_bar=False,
+                reset_num_timesteps=args.resume is None)
+    final = os.path.join(MODEL_DIR, f"{tag}.zip")
+    model.save(final)
+    print(f"saved {final}")
+
+    train_env.close()
+    eval_env.close()
+
+
+if __name__ == "__main__":
+    torch.set_num_threads(max(1, os.cpu_count() // 2))
+    main()

@@ -162,3 +162,43 @@ def test_dp_tailwind_cheaper_than_headwind():
     assert r_tail["success"] and r_head["success"]
     assert r_tail["J"] < r_head["J"]
     assert r_tail["t"] < r_head["t"]
+
+
+# ------------------------------------------------------------ wind-aware obs
+def test_wind_obs_wrapper_shapes_and_content():
+    from wind_obs import WindObsWrapper, WindFieldPool, make_wind_env
+    pool = WindFieldPool(3, seed_base=5_000_000, nx=41, ny=41)
+    env = make_wind_env(pool=pool, obs_cfg=dict(local_res=8, global_res=12), monitor=False)
+    obs, _ = env.reset(seed=1)
+    assert set(obs) == {"vec", "local", "global"}
+    assert obs["local"].shape == (3, 8, 8) and obs["global"].shape == (4, 12, 12)
+    assert env.observation_space.contains(obs)
+    base = env.unwrapped
+    x, y = base.state[:2]
+    # centre of the local crop equals the wind at the ship (K even: average of the 4 centre pixels)
+    wx, wy = base.wind(x, y)
+    c = obs["local"][0, 3:5, 3:5].mean() * 10
+    assert abs(c - wx) < 0.5
+    # ship blob peaks near the ship, goal blob near the goal
+    gi = np.unravel_index(obs["global"][2].argmax(), obs["global"][2].shape)
+    xmin, xmax, _, _ = base.wind.extent
+    cell = (xmax - xmin) / 11
+    assert abs(xmin + gi[0] * cell - x) <= cell and abs(xmin + gi[1] * cell - y) <= cell
+    # wind field changes between resets (pool of 3, seeded)
+    fields = {id(env.unwrapped.wind) for _ in range(10) if env.reset()[0] is not None}
+    assert len(fields) > 1
+    # step keeps the dict shape
+    obs2, r, term, trunc, info = env.step(np.array([1.0, 1.0]))
+    assert env.observation_space.contains(obs2)
+
+
+def test_cnn_extractor_forward():
+    import torch
+    from wind_obs import WindCNNExtractor, WindFieldPool, make_wind_env
+    pool = WindFieldPool(1, seed_base=5_000_000, nx=41, ny=41)
+    env = make_wind_env(pool=pool, monitor=False)
+    ext = WindCNNExtractor(env.observation_space)
+    obs, _ = env.reset(seed=0)
+    batch = {k: torch.as_tensor(v)[None] for k, v in obs.items()}
+    out = ext(batch)
+    assert out.shape == (1, ext.features_dim) and ext.features_dim == 64 * 3

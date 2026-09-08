@@ -50,15 +50,45 @@ def parse_args():
     return ap.parse_args()
 
 
+def load_model(path):
+    """Load an SB3 model; returns (model, obs_cfg) where obs_cfg is the WindObsWrapper config
+    (from the .json sidecar) for wind-aware models, or None for plain-observation models."""
+    from stable_baselines3 import TD3, SAC
+    from gymnasium import spaces
+    last_err = None
+    for Algo in (TD3, SAC):
+        try:
+            model = Algo.load(path, device="cpu")
+            break
+        except Exception as e:  # wrong algorithm class
+            last_err = e
+    else:
+        raise last_err
+    obs_cfg = None
+    if isinstance(model.observation_space, spaces.Dict):
+        from wind_obs import WindObsWrapper
+        cfg_path = os.path.splitext(path)[0] + ".json"
+        if not os.path.exists(cfg_path):  # best-model layout: models/<tag>_best/best_model.zip
+            cfg_path = os.path.join(os.path.dirname(path), "..",
+                                    os.path.basename(os.path.dirname(path)).replace("_best", "") + ".json")
+        obs_cfg = WindObsWrapper.load_config(cfg_path) if os.path.exists(cfg_path) else {}
+    return model, obs_cfg
+
+
 def rollout_policy(model, env, start, goal, wind):
+    """Roll out an SB3 policy from `start` to `goal`; `env` may be wrapped."""
+    base = env.unwrapped
     obs, info = env.reset(options=dict(start=start, goal=goal, wind=wind))
     t0 = time.perf_counter()
-    for _ in range(env.max_steps):
+    traj = [base.state.copy()]
+    for _ in range(base.max_steps):
         action, _ = model.predict(obs, deterministic=True)
         obs, r, terminated, truncated, info = env.step(action)
+        traj.append(base.state.copy())
         if terminated or truncated:
             break
-    return dict(J=info["J"], t=info["t"], success=info["success"], exec_time=time.perf_counter() - t0)
+    return dict(J=info["J"], t=info["t"], success=info["success"], oob=info["oob"],
+                exec_time=time.perf_counter() - t0, traj=np.array(traj))
 
 
 def main():
@@ -66,10 +96,10 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     params = ShipParams()
     legacy = WindField.load_legacy(LEGACY_FIELD) if args.wind == "legacy" else None
-    model = None
+    model, obs_cfg = (None, None)
     if args.model:
-        from stable_baselines3 import TD3
-        model = TD3.load(args.model, device="cpu")
+        model, obs_cfg = load_model(args.model)
+        print(f"loaded {args.model}  wind-aware={obs_cfg is not None}  obs_cfg={obs_cfg}")
 
     rows = []
     for k in range(args.n_cases):
@@ -78,6 +108,10 @@ def main():
         env = ShipEnv(wind, params=params)
         env.reset(seed=case_seed)
         start, goal = env.state[:2].copy(), env.goal.copy()
+        rl_env = env
+        if obs_cfg is not None:
+            from wind_obs import WindObsWrapper
+            rl_env = WindObsWrapper(env, **obs_cfg)
 
         planner = ValueIterationPlanner(wind, goal, params=params, nx=args.nx, ny=args.ny, nv=args.nv,
                                         n_act=args.n_act, exec_n_act=args.exec_n_act, device=args.device)
@@ -90,7 +124,7 @@ def main():
                    dp_solve_time=stats["time"], dp_iters=stats["iterations"], dp_converged=int(stats["converged"]),
                    dp_exec_time=time.perf_counter() - t0)
         if model is not None:
-            pr = rollout_policy(model, env, start, goal, wind)
+            pr = rollout_policy(model, rl_env, start, goal, wind)
             row.update(rl_J=pr["J"], rl_t=pr["t"], rl_success=int(pr["success"]), rl_exec_time=pr["exec_time"],
                        gap=(pr["J"] - res["J"]) / res["J"] if res["success"] and pr["success"] else np.nan)
         rows.append(row)
