@@ -224,8 +224,18 @@ def main():
     )
     if args.resume:
         Algo = TD3 if args.algo == "td3" else SAC
-        model = Algo.load(args.resume, env=train_env, device=args.device)
-        print(f"resumed from {args.resume}")
+        # a behaviour-cloned model was saved with placeholder RL hyper-parameters (tiny buffer,
+        # no exploration noise): override them with this run's settings on load
+        overrides = dict(learning_rate=args.lr, buffer_size=args.buffer_size, batch_size=args.batch_size,
+                         learning_starts=args.learning_starts, gradient_steps=args.gradient_steps,
+                         gamma=args.gamma, train_freq=1)
+        model = Algo.load(args.resume, env=train_env, device=args.device, custom_objects=overrides)
+        if args.algo == "td3":
+            n_act = train_env.action_space.shape[-1]
+            sigma = args.action_noise / float(train_env.action_space.high[0])
+            model.action_noise = NormalActionNoise(mean=np.zeros(n_act), sigma=sigma * np.ones(n_act))
+        print(f"resumed from {args.resume} with lr={args.lr}, buffer={args.buffer_size}, "
+              f"noise={args.action_noise}")
     elif args.algo == "td3":
         n_act = train_env.action_space.shape[-1]
         u_max = float(train_env.action_space.high[0])
