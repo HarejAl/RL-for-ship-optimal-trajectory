@@ -54,8 +54,9 @@ def parse_args():
     ap.add_argument("--local-res", type=int, default=16)
     ap.add_argument("--global-res", type=int, default=16)
     ap.add_argument("--no-global", action="store_true")
-    ap.add_argument("--obs", choices=["wind", "plain"], default="wind",
-                    help="wind: Dict obs with CNN maps; plain: 6-vector obs with an MLP (control experiment)")
+    ap.add_argument("--obs", choices=["wind", "plain", "flat"], default="wind",
+                    help="wind: Dict obs with CNN maps; flat: the same maps flattened into one vector for an MLP; "
+                         "plain: 6-vector obs with an MLP (wind-blind control)")
     ap.add_argument("--fixed-wind", default=None,
                     help="train and validate on ONE field: 'legacy' (WF.pkl) or an integer generator seed")
     ap.add_argument("--seed", type=int, default=0)
@@ -97,6 +98,8 @@ def main():
 
     obs_cfg = dict(local_size=args.local_size, local_res=args.local_res,
                    global_res=args.global_res, use_global=not args.no_global)
+    if args.obs == "flat":
+        obs_cfg["flatten"] = True
     from wind_obs import WindObsWrapper
     WindObsWrapper.save_config(os.path.join(MODEL_DIR, f"{tag}.json"), obs_cfg)
 
@@ -118,7 +121,7 @@ def main():
         n_envs=1, seed=args.seed + 12345, vec_env_cls=DummyVecEnv,
     )
 
-    if plain:
+    if plain or args.obs == "flat":
         policy_kwargs = dict(net_arch=dict(pi=[256, 256], qf=[256, 256]))
     else:
         policy_kwargs = dict(
@@ -128,7 +131,7 @@ def main():
             share_features_extractor=False,
         )
     common = dict(
-        policy="MlpPolicy" if plain else "MultiInputPolicy", env=train_env, learning_rate=args.lr, gamma=args.gamma,
+        policy="MlpPolicy" if (plain or args.obs == "flat") else "MultiInputPolicy", env=train_env, learning_rate=args.lr, gamma=args.gamma,
         buffer_size=args.buffer_size, batch_size=args.batch_size, learning_starts=args.learning_starts,
         train_freq=1, gradient_steps=args.gradient_steps, policy_kwargs=policy_kwargs,
         seed=args.seed, device=args.device, verbose=0,
@@ -148,7 +151,8 @@ def main():
 
     model.set_logger(configure(log_dir, ["stdout", "csv"]))
     print(f"[{tag}] {args.algo.upper()} on {'ONE field (' + str(args.fixed_wind) + ')' if args.fixed_wind else str(args.n_train_fields) + ' train fields'}, "
-          f"{args.n_envs} envs, device={model.device}, obs={'plain' if plain else obs_cfg}, env={train_kwargs}")
+          f"{args.n_envs} envs, device={model.device}, obs={'plain' if plain else obs_cfg}, "
+          f"obs_dim={train_env.observation_space}, env={train_kwargs}")
     print(model.policy)
 
     callbacks = [

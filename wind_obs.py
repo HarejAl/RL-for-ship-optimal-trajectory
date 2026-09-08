@@ -175,16 +175,27 @@ def _make_extractor_class():
 WindCNNExtractor = _make_extractor_class()
 
 
+def wrap_wind_obs(base_env, obs_cfg):
+    """Apply WindObsWrapper (and FlattenObservation if obs_cfg['flatten']) to a ShipEnv."""
+    cfg = dict(obs_cfg or {})
+    flatten = cfg.pop("flatten", False)
+    env = WindObsWrapper(base_env, **cfg)
+    if flatten:
+        env = gym.wrappers.FlattenObservation(env)
+    return env
+
+
 def make_wind_env(pool=None, wind=None, obs_cfg=None, env_kwargs=None, monitor=True):
-    """ShipEnv + WindObsWrapper (+ Monitor). Either a pool (sampled per reset) or a fixed wind."""
+    """ShipEnv + WindObsWrapper (+ FlattenObservation) (+ Monitor).
+    Either a pool (sampled per reset) or a fixed wind. obs_cfg may contain 'flatten': True
+    to get a flat Box observation for MlpPolicy instead of the Dict for the CNN extractor."""
     from env import ShipEnv
     env_kwargs = env_kwargs or {}
-    obs_cfg = obs_cfg or {}
     if pool is not None:
         base = ShipEnv(wind_sampler=pool.sampler, **env_kwargs)
     else:
         base = ShipEnv(wind, **env_kwargs)
-    env = WindObsWrapper(base, **obs_cfg)
+    env = wrap_wind_obs(base, obs_cfg)
     if monitor:
         from stable_baselines3.common.monitor import Monitor
         env = Monitor(env, info_keywords=("success", "J", "t", "goal_radius"))

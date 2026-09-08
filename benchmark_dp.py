@@ -65,7 +65,8 @@ def load_model(path):
     else:
         raise last_err
     obs_cfg = None
-    if isinstance(model.observation_space, spaces.Dict):
+    plain_dim = model.observation_space.shape == (6,)
+    if isinstance(model.observation_space, spaces.Dict) or not plain_dim:
         from wind_obs import WindObsWrapper
         cfg_path = os.path.splitext(path)[0] + ".json"
         if not os.path.exists(cfg_path):  # best-model layout: models/<tag>_best/best_model.zip
@@ -110,8 +111,8 @@ def main():
         start, goal = env.state[:2].copy(), env.goal.copy()
         rl_env = env
         if obs_cfg is not None:
-            from wind_obs import WindObsWrapper
-            rl_env = WindObsWrapper(env, **obs_cfg)
+            from wind_obs import wrap_wind_obs
+            rl_env = wrap_wind_obs(env, obs_cfg)
 
         planner = ValueIterationPlanner(wind, goal, params=params, nx=args.nx, ny=args.ny, nv=args.nv,
                                         n_act=args.n_act, exec_n_act=args.exec_n_act, device=args.device)

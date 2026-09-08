@@ -65,8 +65,8 @@ def main():
 
         rl_env = env
         if obs_cfg is not None:
-            from wind_obs import WindObsWrapper
-            rl_env = WindObsWrapper(env, **obs_cfg)
+            from wind_obs import wrap_wind_obs
+            rl_env = wrap_wind_obs(env, obs_cfg)
         rl = rollout_policy(model, rl_env, start, goal, wind)
 
         plot_wind_field(ax, wind)
