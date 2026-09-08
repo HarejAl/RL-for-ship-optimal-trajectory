@@ -42,7 +42,9 @@ def parse_args():
     ap.add_argument("--gamma", type=float, default=0.99)
     ap.add_argument("--learning-starts", type=int, default=10_000)
     ap.add_argument("--gradient-steps", type=int, default=-1, help="-1: one per collected transition")
-    ap.add_argument("--action-noise", type=float, default=2.0, help="TD3 exploration noise std (action units)")
+    ap.add_argument("--action-noise", type=float, default=1.5,
+                    help="TD3 exploration noise std in action units (SB3 applies it in the scaled [-1,1] space, "
+                         "so it is divided by u_max internally)")
     ap.add_argument("--local-size", type=float, default=2.0)
     ap.add_argument("--local-res", type=int, default=16)
     ap.add_argument("--global-res", type=int, default=16)
@@ -106,7 +108,9 @@ def main():
         print(f"resumed from {args.resume}")
     elif args.algo == "td3":
         n_act = train_env.action_space.shape[-1]
-        noise = NormalActionNoise(mean=np.zeros(n_act), sigma=args.action_noise * np.ones(n_act))
+        u_max = float(train_env.action_space.high[0])
+        sigma = args.action_noise / u_max  # SB3 adds the noise to the scaled action in [-1, 1]
+        noise = NormalActionNoise(mean=np.zeros(n_act), sigma=sigma * np.ones(n_act))
         model = TD3(action_noise=noise, **common)
     else:
         model = SAC(ent_coef="auto", **common)
@@ -138,5 +142,5 @@ def main():
 
 
 if __name__ == "__main__":
-    torch.set_num_threads(max(1, os.cpu_count() // 2))
+    torch.set_num_threads(2)  # GPU does the training; keep CPU threads low to coexist with other jobs
     main()
