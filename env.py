@@ -6,6 +6,9 @@ Action      : [ux, uy] thrust, each in [-u_max, u_max]
 Reward      : -stage_cost(u) + target_w * (d_prev - d)     (potential-based shaping)
               + goal_bonus when the goal disc is entered
               - oob_penalty when the ship leaves the wind grid
+Terminal terms are kept at the scale of the dense signal (the shaping sums to the
+start distance, 2-10, over an episode); a penalty of 100 buries that structure in
+the critic and makes TD3 saturate to a bang-bang exit policy.
 Termination : goal reached, or ship outside the wind grid
 Truncation  : max_steps
 
@@ -38,8 +41,8 @@ class ShipEnv(gym.Env):
         min_start_goal_dist=2.0,
         max_steps=600,
         target_w=1.0,
-        goal_bonus=100.0,
-        oob_penalty=100.0,
+        goal_bonus=10.0,
+        oob_penalty=10.0,
     ):
         """
         wind         : WindField, or a legacy dict with keys x, y, Intensity, Direction

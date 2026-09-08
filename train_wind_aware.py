@@ -45,6 +45,9 @@ def parse_args():
     ap.add_argument("--action-noise", type=float, default=1.5,
                     help="TD3 exploration noise std in action units (SB3 applies it in the scaled [-1,1] space, "
                          "so it is divided by u_max internally)")
+    ap.add_argument("--goal-bonus", type=float, default=10.0)
+    ap.add_argument("--oob-penalty", type=float, default=10.0)
+    ap.add_argument("--target-w", type=float, default=1.0, help="distance shaping weight")
     ap.add_argument("--local-size", type=float, default=2.0)
     ap.add_argument("--local-res", type=int, default=16)
     ap.add_argument("--global-res", type=int, default=16)
@@ -56,9 +59,9 @@ def parse_args():
     return ap.parse_args()
 
 
-def _env_factory(n_fields, seed_base, obs_cfg):
+def _env_factory(n_fields, seed_base, obs_cfg, env_kwargs):
     pool = WindFieldPool(n_fields, seed_base=seed_base)
-    return make_wind_env(pool=pool, obs_cfg=obs_cfg)
+    return make_wind_env(pool=pool, obs_cfg=obs_cfg, env_kwargs=env_kwargs)
 
 
 def main():
@@ -80,13 +83,14 @@ def main():
     from wind_obs import WindObsWrapper
     WindObsWrapper.save_config(os.path.join(MODEL_DIR, f"{tag}.json"), obs_cfg)
 
+    env_kwargs = dict(goal_bonus=args.goal_bonus, oob_penalty=args.oob_penalty, target_w=args.target_w)
     vec_cls = SubprocVecEnv if args.n_envs > 1 else DummyVecEnv
     train_env = make_vec_env(
-        functools.partial(_env_factory, args.n_train_fields, TRAIN_SEED_BASE, obs_cfg),
+        functools.partial(_env_factory, args.n_train_fields, TRAIN_SEED_BASE, obs_cfg, env_kwargs),
         n_envs=args.n_envs, seed=args.seed, vec_env_cls=vec_cls,
     )
     eval_env = make_vec_env(
-        functools.partial(_env_factory, args.n_eval_fields, EVAL_SEED_BASE, obs_cfg),
+        functools.partial(_env_factory, args.n_eval_fields, EVAL_SEED_BASE, obs_cfg, env_kwargs),
         n_envs=1, seed=args.seed + 12345, vec_env_cls=DummyVecEnv,
     )
 
@@ -117,7 +121,7 @@ def main():
 
     model.set_logger(configure(log_dir, ["stdout", "csv"]))
     print(f"[{tag}] {args.algo.upper()} on {args.n_train_fields} train fields, "
-          f"{args.n_envs} envs, device={model.device}, obs={obs_cfg}")
+          f"{args.n_envs} envs, device={model.device}, obs={obs_cfg}, env={env_kwargs}")
     print(model.policy)
 
     callbacks = [
