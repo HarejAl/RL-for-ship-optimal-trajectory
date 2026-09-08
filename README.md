@@ -111,6 +111,33 @@ The legacy demo still runs with `python legacy/main.py`.
 
 ---
 
+## Preliminary results (2026-09-08)
+
+Single-field control experiment: a plain MLP TD3 policy trained on the legacy field
+(300k steps, goal-radius curriculum), benchmarked on 20 seeded start/goal pairs of the
+same field against the DP baseline (61x61x13x13 grid). Numbers from
+`benchmark_dp.py --wind legacy --model models/td3_plain_legacy_best/best_model.zip`:
+
+| | DP baseline | RL policy |
+| --- | --- | --- |
+| success rate | 95% (19/20) | 80% (16/20) |
+| cost J, cases solved by both | reference | median gap +28%, mean +49% |
+| online time per episode | 35 s solve (shared GPU; ~10 s idle) | 27 ms |
+
+Observations:
+- The RL policy is usually *faster* than DP but spends more thrust, so its cost is
+  higher: the distance-shaping term plus discounting bias it toward speed. Reducing the
+  shaping weight late in training (or using the exact `gamma*Phi(s') - Phi(s)` form) is
+  the obvious next fix for the gap.
+- The one DP failure is a greedy-lookahead limit cycle near a goal in an 8 m/s
+  crosswind; a finer velocity grid (`--nv 21`) solves it. The value function
+  overestimates the true cost on such cases, so the reported gaps are conservative for
+  the RL side. A grid-refinement study is required before publication.
+- Wind-aware CNN policies on 200 random fields are still training; the wind-blind
+  multi-field MLP is the ablation they must beat.
+
+---
+
 ## Roadmap
 
 1. Done: physically consistent dynamics, seeded environment, wind-field generator, DP baseline and benchmark harness.
