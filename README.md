@@ -133,8 +133,33 @@ Observations:
   crosswind; a finer velocity grid (`--nv 21`) solves it. The value function
   overestimates the true cost on such cases, so the reported gaps are conservative for
   the RL side. A grid-refinement study is required before publication.
-- Wind-aware CNN policies on 200 random fields are still training; the wind-blind
-  multi-field MLP is the ablation they must beat.
+
+Multi-field, held-out evaluation (30 generated fields never seen in training, one
+start/goal each, DP grid 61x61x13x13). Wind-blind MLP TD3 trained on 200 random fields
+(snapshot at ~300k steps, `benchmark_dp.py --n-cases 30 --wind random --model ...`):
+
+| | DP baseline | wind-blind RL |
+| --- | --- | --- |
+| success rate | 97% | 73% |
+| cost gap, 22 cases solved by both | reference | median +34%, mean +67% (10th-90th pct: +20% to +74%) |
+| online time per episode | 16 s solve | 43 ms |
+
+Observation-design ablation on the same 200 training fields (TD3, curriculum):
+
+| observation | training success at ~100k steps | comment |
+| --- | --- | --- |
+| 6-vector, wind-blind | 71% | learns fastest; strong baseline |
+| 6-vector + 3x3 wind stencil | 34% | learns, slower |
+| flattened 6x6 local crop + 8x8 global map (370-d, MLP) | 20% (16% at 220k) | fails |
+| Dict local 16x16 + global 16x16 with CNN extractor (TD3 or SAC) | no successes by 250k | fails |
+
+Conclusion so far: TD3/SAC from scratch do not extract wind information from map
+inputs within the step budgets that fit on a shared GPU; the map channels act as
+noise for the critic. The natural remedy is to use the DP baseline as a teacher:
+one value-iteration solve yields the optimal action for *every* state of that
+(field, goal), so a large supervised dataset for the CNN policy is cheap, and RL
+can fine-tune from the cloned policy ("amortised DP"). This is the recommended
+next step and is also a cleaner story for the paper.
 
 ---
 
