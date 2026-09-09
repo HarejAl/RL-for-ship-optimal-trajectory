@@ -178,17 +178,45 @@ DP. Data matters: the same recipe on 37 fields gave 20-30% success and a 7.6% me
 gap. Remaining weakness is the success rate (compounding imitation error: stalling just
 outside the goal disc, occasional drift out of the domain), which RL fine-tuning targets.
 
-Fine-tuning notes: plain TD3 from the clone erodes it within ~10k actor updates (50% ->
-15% success) because the critic is not yet accurate; TD3+BC (`--bc-weight`, cloning
-term on demonstration samples in the actor loss, replay buffer pre-filled with the DP
-transitions, critic warm-up with the actor frozen) is used instead.
+### Improving the clone: DAgger vs RL fine-tuning
+
+Two ways to raise the success rate were tried on the same 30 held-out cases:
+
+* **DAgger round 1** (`dp_dataset.py --rollout-policy models/bc_v1.zip --rollout-noise 0.5`):
+  roll out the clone on 60 training fields x 2 goals, label the 525k visited states
+  with the DP action, retrain on the aggregated 1.27M samples -> `bc_v2`.
+* **TD3+BC fine-tuning** (`train_wind_aware.py --resume models/bc_v1.zip --demo-data ...
+  --bc-weight 1.0 --critic-warmup 5000`, 400k env steps) -> `ft_v1_best`. Plain TD3
+  from the clone erodes it within ~10k actor updates (50% -> 15% success) because the
+  critic is not yet accurate; the cloning term prevents that.
+
+| policy | success | median gap | mean gap | gap p10 / p90 | time ratio vs DP | exec / episode |
+| --- | --- | --- | --- | --- | --- | --- |
+| DP baseline | 97% | ref | ref | | 1.00 | 12-17 s solve |
+| wind-blind RL (TD3, 600k) | 73% | +34.4% | +66.8% | +20 / +74 | 1.38 | 43 ms |
+| clone `bc_v1` | 63% | +3.5% | +7.2% | -0.6 / +15.7 | 1.07 | 347 ms |
+| **DAgger clone `bc_v2`** | **67%** | **+1.4%** | **+5.8%** | -1.4 / +19.1 | 1.05 | 219 ms |
+| TD3+BC fine-tuned `ft_v1_best` | 67% | +9.7% | +31.3% | +0.3 / +50.2 | 1.15 | 186 ms |
+
+(gaps over the cases solved by both DP and the policy; exec time is dominated by the
+600-step timeouts of failed episodes, a successful episode takes ~60 ms on CPU)
+
+DAgger is the better route: it keeps the near-optimal cost and raises success. RL
+fine-tuning raises success on the validation set but drifts the policy toward the
+reward's speed bias and triples the cost gap, so it is not recommended without a
+reward that matches the DP cost exactly (see the shaping note above).
+
+Failure analysis: cases 0, 1, 4 and 9 fail for every learned policy. Three of them have
+the goal within 0.5 units of the spawn-box edge (the policy stalls or circles next to
+the goal, see `output/compare_bc_v2_hard.png`); case 8 is a DP greedy-rollout failure
+(not counted). A DAgger round targeted at near-edge goals is the obvious next step.
 
 ---
 
 ## Roadmap
 
 1. Done: physically consistent dynamics, seeded environment, wind-field generator, DP baseline and benchmark harness.
-2. Done: wind-aware CNN policy via DP-teacher behaviour cloning (median gap 3.3% on held-out fields, 63% success); TD3+BC fine-tuning in progress to raise the success rate.
+2. Done: wind-aware CNN policy via DP-teacher behaviour cloning + one DAgger round (`bc_v2`: 67% success, median gap 1.4% on held-out fields). Next: targeted DAgger rounds for near-edge goals, grid-refinement study of the DP teacher.
 3. Preference-conditioned policy: the cost weight ratio as an input, giving the whole fast-to-economical Pareto front from one network.
 4. Time-varying wind: receding-horizon execution where the field is swapped at each forecast step, compared with re-solved DP.
 5. Real forecast data (for example ERA5 10 m wind) and a 3-DOF ship model.
