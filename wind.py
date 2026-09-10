@@ -234,10 +234,14 @@ class WindField:
             }
             if model:
                 params["models"] = model
-            for attempt in range(6):  # exponential backoff on rate limiting / transient errors
+            # patient backoff: the free endpoint rate-limits bursts, and a big grid is several calls
+            for attempt in range(8):
                 r = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=timeout)
                 if r.status_code == 429 or r.status_code >= 500:
-                    time.sleep(2.0 * (attempt + 1))
+                    wait = min(10.0 * (attempt + 1), 60.0)
+                    print(f"  [open-meteo] {r.status_code}, retrying in {wait:.0f}s "
+                          f"(attempt {attempt + 1}/8)", flush=True)
+                    time.sleep(wait)
                     continue
                 r.raise_for_status()
                 break
