@@ -6,3 +6,5 @@ output/
 models/
 data/
 output/anim/
+output/showcase/
+output/cache/

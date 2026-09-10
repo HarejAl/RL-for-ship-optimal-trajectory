@@ -71,6 +71,32 @@ def parse_args():
     return ap.parse_args()
 
 
+def fetch_cached(rname, lat, lon, args):
+    """Fetch a forecast sequence, caching it on disk so re-runs cost no API calls."""
+    cache_dir = os.path.join(OUTPUT_DIR, "cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    slug = rname.lower().replace(" ", "_")
+    path = os.path.join(cache_dir, f"wind_{slug}_{args.nx}x{args.ny}_h{args.hours}"
+                                   f"_ref{args.ref_speed:g}.npz")
+    if os.path.exists(path):
+        with np.load(path, allow_pickle=True) as f:
+            x, y, WX, WY = f["x"], f["y"], f["wx"], f["wy"]
+            times = [str(t) for t in f["times"]]
+            meta = dict(f["meta"].item())
+        print(f"  (cached) {os.path.basename(path)}", flush=True)
+        return [(times[i], WindField(x, y, WX[i], WY[i], meta=meta)) for i in range(len(times))]
+    slices = WindField.from_openmeteo_sequence(
+        lat, lon, nx=args.nx, ny=args.ny, hours=list(range(args.hours)),
+        forecast_days=args.forecast_days, ref_speed=args.ref_speed)
+    f0 = slices[0][1]
+    np.savez_compressed(path, x=f0.x, y=f0.y,
+                        wx=np.stack([f.wx for _, f in slices]),
+                        wy=np.stack([f.wy for _, f in slices]),
+                        times=np.array([t for t, _ in slices], dtype=object),
+                        meta=np.array(f0.meta, dtype=object))
+    return slices
+
+
 def main():
     args = parse_args()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -82,9 +108,11 @@ def main():
     for rname in args.regions:
         lat, lon = REGIONS[rname]
         print(f"\n=== {rname}  lat={lat} lon={lon} ===", flush=True)
-        slices = WindField.from_openmeteo_sequence(
-            lat, lon, nx=args.nx, ny=args.ny, hours=list(range(args.hours)),
-            forecast_days=args.forecast_days, ref_speed=args.ref_speed)
+        try:
+            slices = fetch_cached(rname, lat, lon, args)
+        except Exception as e:  # a rate-limited or failed region must not lose the whole study
+            print(f"  SKIPPED {rname}: {type(e).__name__} {e}", flush=True)
+            continue
         meta = slices[0][1].meta
         sec_per_tu = meta["km_per_unit"] * 1000.0 / meta["ms_per_unit"]
         span = min(meta["domain_span"])
@@ -141,14 +169,24 @@ def main():
                       f"{'ok' if pol['success'] else 'FAIL'} J={pol['J']:5.2f} "
                       f"({row['policy_gap'] * 100:+5.1f}%)", flush=True)
 
+        write_csv(rows)  # after every region, so a later failure cannot lose the study
+
+    if not rows:
+        print("no cases completed")
+        return
+    summarise(rows, args)
+    print(f"\nsaved {out_csv}   (total {(time.perf_counter() - t_start) / 60:.1f} min)")
+
+
+def write_csv(rows):
+    if not rows:
+        return
     out_csv = os.path.join(OUTPUT_DIR, "staleness_study.csv")
     with open(out_csv, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         w.writeheader()
         w.writerows(rows)
-
-    summarise(rows, args)
-    print(f"\nsaved {out_csv}   (total {(time.perf_counter() - t_start) / 60:.1f} min)")
+    return out_csv
 
 
 def summarise(rows, args):
