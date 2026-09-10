@@ -5,3 +5,4 @@ output/
 *.egg-info/
 models/
 data/
+output/anim/

@@ -55,6 +55,13 @@ Note on scales: with the default coefficients a 10 unit wind exerts a force of 2
 the maximum thrust is about 14, so regions of very strong headwind are physically
 unreachable. The value function shows them as saturated cost.
 
+Task settings (`ShipEnv`): an episode ends when the ship enters a disc of radius
+`goal_radius = 0.5` around the goal (reaching it exactly is not required); start and goal
+are sampled at least `min_start_goal_dist = 4.0` apart so the routing problem is not
+trivial. The random wind generator uses a short correlation length (`gust_length` 0.5-1.8)
+for choppier fields. **The results tables below were produced with the earlier settings
+(0.25 disc, 2.0 min distance, longer gusts) and are being regenerated for the new task.**
+
 ---
 
 ## DP baseline

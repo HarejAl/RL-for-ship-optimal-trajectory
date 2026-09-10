@@ -41,7 +41,7 @@ class ValueIterationPlanner:
         v_max=None,
         n_act=5,
         exec_n_act=9,
-        goal_radius=0.25,
+        goal_radius=0.5,
         oob_cost=100.0,
         device=None,
         weight_mode="auto",

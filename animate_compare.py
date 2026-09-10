@@ -66,12 +66,10 @@ def parse_args():
     ap.add_argument("--tail", type=int, default=40, help="length of the fading trail, in drawn frames")
     ap.add_argument("--device", default=None)
     ap.add_argument("--label", default="DAgger clone", help="legend label for the learned policy")
-    ap.add_argument("--with-straight", action="store_true",
-                    help="also animate the naive wind-blind straight-line autopilot")
     return ap.parse_args()
 
 
-def make_animation(wind, start, goal, agents, params, out_path, args):
+def make_animation(wind, start, goal, agents, goal_radius, params, out_path, args):
     """
     agents: list of dicts, each {res, label, color, ls}. `res` has traj, actions, success.
     Draws every agent's ship moving over the wind field with a live cost readout.
@@ -94,7 +92,7 @@ def make_animation(wind, start, goal, agents, params, out_path, args):
     cb.set_label("wind speed")
     ax.plot(*start, "o", color="white", mec="black", ms=9, zorder=5)
     ax.plot(*goal, "s", color="gold", mec="black", ms=11, zorder=5, label="goal")
-    ax.add_patch(plt.Circle(goal, 0.25, fill=False, ec="gold", lw=1.2, ls=":"))
+    ax.add_patch(plt.Circle(goal, goal_radius, fill=False, ec="gold", lw=1.2, ls=":"))
 
     for a in agents:
         (a["line"],) = ax.plot([], [], color=a["color"], lw=2.6, ls=a.get("ls", "-"),
@@ -161,19 +159,13 @@ def main():
 
         agents = [dict(res=dp_res, label="DP", color="cyan", ls="-"),
                   dict(res=rl_res, label=args.label, color="orangered", ls="--")]
-        extra = ""
-        if args.with_straight:
-            from baselines import straight_line_rollout
-            st_res = straight_line_rollout(env, start, goal, wind)
-            agents.append(dict(res=st_res, label="straight", color="#ffff33", ls=":"))
-            extra = f" | straight J={st_res['J']:.2f} ok={st_res['success']}"
 
         out = os.path.join(OUTPUT_DIR, f"compare_{i:02d}_seed{seed}.gif")
-        make_animation(wind, start, goal, agents, params, out, args)
+        make_animation(wind, start, goal, agents, env.goal_radius, params, out, args)
         made.append(out)
         gap = ((rl_res["J"] - dp_res["J"]) / dp_res["J"] * 100) if (dp_res["success"] and rl_res["success"]) else float("nan")
         print(f"[{i:02d}] seed {seed}: DP J={dp_res['J']:.2f} ok={dp_res['success']} | "
-              f"RL J={rl_res['J']:.2f} ok={rl_res['success']} gap={gap:+.1f}%{extra}  -> {out}", flush=True)
+              f"RL J={rl_res['J']:.2f} ok={rl_res['success']} gap={gap:+.1f}%  -> {out}", flush=True)
 
     print(f"\nsaved {len(made)} animations to {OUTPUT_DIR}")
 

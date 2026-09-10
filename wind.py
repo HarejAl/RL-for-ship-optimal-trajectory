@@ -148,7 +148,7 @@ def generate_wind_field(
     extent=(-1.0, 11.0),
     background_speed=(0.0, 4.0),
     gust_amplitude=(1.0, 4.0),
-    gust_length=(0.8, 3.0),
+    gust_length=(0.5, 1.8),
     n_vortices=(0, 3),
     vortex_radius=(1.0, 3.0),
     vortex_strength=(2.0, 8.0),
