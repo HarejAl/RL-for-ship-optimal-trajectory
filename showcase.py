@@ -156,13 +156,14 @@ def poster(cases, args):
     return out
 
 
-def animate(case, args, params, stride=1):
+def animate(case, args, params, stride=3):
+    """Lighter than the stills on purpose: GIFs go into slides, so keep them a few MB."""
     traj = case["res"]["traj"]
     n = len(traj)
     frames = (n + stride - 1) // stride
-    fig, ax = plt.subplots(figsize=(7.6, 7.2), facecolor="#04121f")
+    fig, ax = plt.subplots(figsize=(5.6, 5.4), facecolor="#04121f", dpi=100)
     ax.set_facecolor("#04121f")
-    paint(ax, case["wind"], cmap=args.cmap)
+    paint(ax, case["wind"], cmap=args.cmap, density=1.1, lw_scale=1.6)
     ax.plot([case["start"][0], case["goal"][0]], [case["start"][1], case["goal"][1]],
             color="white", lw=1.2, ls=(0, (5, 4)), alpha=0.5, zorder=5)
     endpoints(ax, case["start"], case["goal"], case["env"].goal_radius)
