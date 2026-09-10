@@ -59,8 +59,8 @@ Task settings (`ShipEnv`): an episode ends when the ship enters a disc of radius
 `goal_radius = 0.5` around the goal (reaching it exactly is not required); start and goal
 are sampled at least `min_start_goal_dist = 4.0` apart so the routing problem is not
 trivial. The random wind generator uses a short correlation length (`gust_length` 0.5-1.8)
-for choppier fields. **The results tables below were produced with the earlier settings
-(0.25 disc, 2.0 min distance, longer gusts) and are being regenerated for the new task.**
+for choppier fields. Current-task results are in "Results — current task" below; the
+"Earlier results" section keeps the original 0.25-disc numbers for reference.
 
 ---
 
@@ -118,7 +118,38 @@ The legacy demo still runs with `python legacy/main.py`.
 
 ---
 
-## Preliminary results (2026-09-08)
+## Results — current task (2026-09-10)
+
+Task: 0.5-radius goal disc, start and goal >= 4 units apart, choppier wind
+(`gust_length` 0.5-1.8). Wind-aware CNN policy cloned from the DP teacher
+(`dp_dataset.py` -> 300 solves, 768k labelled states -> `pretrain_bc.py`).
+Held-out benchmark, 30 generated fields unseen in training
+(`benchmark_dp.py --n-cases 30 --wind random --model models/bc_t2.zip`):
+
+| policy | success | median gap | mean gap | gap p10 / p90 | online / episode |
+| --- | --- | --- | --- | --- | --- |
+| DP baseline | 100% | ref | ref | | 4 s solve |
+| **clone `bc_t2`** (behaviour cloning only) | **83%** | **+3.5%** | +9.5% | +0.8 / +27 | 0.13 s |
+| DAgger clone `bc_t2_dag` | 77% | +3.1% | +10.5% | +0.8 / +35 | 0.13 s |
+
+Findings on the updated task:
+- Widening the goal disc from 0.25 to 0.5 raised the clone's success from 63% to **83%**
+  at the same ~3.5% median cost gap — the old near-miss stalls now count as arrivals.
+- The **DAgger round no longer helps** (77% < 83%; its failures are a strict superset of
+  the clone's). DAgger previously fixed near-goal stalls, which the wider disc removed, so
+  plain behaviour cloning is now the recommended recipe. `bc_t2` is the best model.
+- The 5 remaining `bc_t2` failures are genuinely hard: two goals sit within 0.3 units of
+  the domain edge (the policy overshoots and exits), three are long routes through choppy
+  wind (DP cost 4.4-7.1). Targeted data near the edge and stronger-wind fields is the next
+  lever, not DAgger.
+- DP now solves all 30 cases (was 97%) and converges in ~4 s (choppier fields need fewer
+  value-iteration sweeps). NB: value iteration is the *optimality* reference, not a fast
+  online planner — for the compute-saving claim, benchmark against isochrone/Dijkstra
+  weather routing or a fast-marching HJB solver as the speed reference.
+
+---
+
+## Earlier results — original task, 0.25 disc (2026-09-08)
 
 Single-field control experiment: a plain MLP TD3 policy trained on the legacy field
 (300k steps, goal-radius curriculum), benchmarked on 20 seeded start/goal pairs of the
@@ -223,7 +254,7 @@ the goal, see `output/compare_bc_v2_hard.png`); case 8 is a DP greedy-rollout fa
 ## Roadmap
 
 1. Done: physically consistent dynamics, seeded environment, wind-field generator, DP baseline and benchmark harness.
-2. Done: wind-aware CNN policy via DP-teacher behaviour cloning + one DAgger round (`bc_v2`: 67% success, median gap 1.4% on held-out fields). Next: targeted DAgger rounds for near-edge goals, grid-refinement study of the DP teacher.
+2. Done: wind-aware CNN policy via DP-teacher behaviour cloning (`bc_t2`: 83% success, median gap 3.5% on the current task; DAgger no longer needed with the 0.5 disc). Next: harder-case data (edge goals, stronger wind), a fast competitive planner as the speed reference, grid-refinement study of the DP teacher.
 3. Preference-conditioned policy: the cost weight ratio as an input, giving the whole fast-to-economical Pareto front from one network.
 4. Time-varying wind: receding-horizon execution where the field is swapped at each forecast step, compared with re-solved DP.
 5. Real forecast data (for example ERA5 10 m wind) and a 3-DOF ship model.
