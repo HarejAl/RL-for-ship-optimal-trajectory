@@ -80,6 +80,141 @@ class WindField:
         with np.load(path) as f:
             return cls(f["x"], f["y"], f["wx"], f["wy"])
 
+    # ----------------------------------------------------- real forecast data
+    @classmethod
+    def from_openmeteo(cls, lat_range, lon_range, nx=24, ny=24, hour=0,
+                       forecast_days=2, extent=(-1.0, 11.0), max_speed=None,
+                       model=None, timeout=60, return_times=False):
+        """
+        Build a WindField from Open-Meteo 10 m wind (no API key needed).
+
+        lat_range, lon_range : (min, max) degrees of the region to cover.
+        nx, ny               : grid resolution (nx along longitude -> x, ny along latitude -> y).
+        hour                 : index into the hourly forecast to use (0 = first hour).
+        max_speed            : if set, speeds are rescaled so the max equals this (the ship
+                               model saturates near 10 units); None keeps real m/s.
+        model                : optional Open-Meteo model id (e.g. "ecmwf_ifs025"); None = default.
+        return_times         : also return the list of hourly timestamps (for time-varying use).
+
+        Longitude maps to the x axis and latitude to the y axis, each linearly onto `extent`.
+        The two spans are mapped independently, so a non-square lat/lon box is stretched to a
+        square domain -- fine for a nondimensional study, note it if you need true distances.
+        Wind direction is meteorological ("from"), converted to (east, north) components.
+        """
+        import time
+        import requests
+
+        lat0, lat1 = sorted(lat_range)
+        lon0, lon1 = sorted(lon_range)
+        lats = np.linspace(lat0, lat1, ny)
+        lons = np.linspace(lon0, lon1, nx)
+        LO, LA = np.meshgrid(lons, lats, indexing="ij")  # (nx, ny), lon first
+        flat_lat = LA.ravel()
+        flat_lon = LO.ravel()
+
+        speed, direction, times = cls._fetch_openmeteo(
+            flat_lat, flat_lon, forecast_days, model, timeout, requests, time)
+        wx, wy = cls._build_components(speed[:, hour].reshape(nx, ny),
+                                       direction[:, hour].reshape(nx, ny), max_speed)
+        x = np.linspace(extent[0], extent[1], nx)
+        y = np.linspace(extent[0], extent[1], ny)
+        field = cls(x, y, wx, wy)
+        return (field, times) if return_times else field
+
+    @classmethod
+    def from_openmeteo_sequence(cls, lat_range, lon_range, nx=24, ny=24, hours=None,
+                                forecast_days=2, extent=(-1.0, 11.0), max_speed=None,
+                                model=None, timeout=60):
+        """
+        Fetch ONE Open-Meteo query and return a list of (timestamp, WindField) for the
+        given `hours` (default every 3 h over the horizon). This is the time-varying input
+        for a receding-horizon run: the same region sampled at successive forecast hours.
+        When `max_speed` is set the whole sequence is rescaled by one shared factor so the
+        fields stay comparable across time.
+        """
+        import time
+        import requests
+        lat0, lat1 = sorted(lat_range)
+        lon0, lon1 = sorted(lon_range)
+        lats = np.linspace(lat0, lat1, ny)
+        lons = np.linspace(lon0, lon1, nx)
+        LO, LA = np.meshgrid(lons, lats, indexing="ij")
+        speed, direction, times = cls._fetch_openmeteo(
+            LA.ravel(), LO.ravel(), forecast_days, model, timeout, requests, time)
+        n_hours = speed.shape[1]
+        if hours is None:
+            hours = list(range(0, n_hours, 3))
+        hours = [h for h in hours if h < n_hours]
+        shared = None
+        if max_speed is not None:  # one scale for the whole sequence
+            sp_all = np.hypot(*cls._build_components(speed[:, hours].reshape(nx, ny, -1),
+                                                     direction[:, hours].reshape(nx, ny, -1), None))
+            shared = max_speed / max(sp_all.max(), 1e-9)
+        x = np.linspace(extent[0], extent[1], nx)
+        y = np.linspace(extent[0], extent[1], ny)
+        out = []
+        for h in hours:
+            wx, wy = cls._build_components(speed[:, h].reshape(nx, ny),
+                                           direction[:, h].reshape(nx, ny), None)
+            if shared is not None:
+                wx, wy = wx * shared, wy * shared
+            out.append((times[h] if times else h, cls(x, y, wx, wy)))
+        return out
+
+    @staticmethod
+    def _build_components(speed, direction_deg, max_speed):
+        """Meteorological (speed, direction 'from') -> (east, north) components, optionally rescaled."""
+        d = np.deg2rad(np.nan_to_num(direction_deg))
+        sp = np.nan_to_num(speed)
+        wx = -sp * np.sin(d)
+        wy = -sp * np.cos(d)
+        if max_speed is not None:
+            s = max_speed / max(np.hypot(wx, wy).max(), 1e-9)
+            wx, wy = wx * s, wy * s
+        return wx, wy
+
+    @staticmethod
+    def _fetch_openmeteo(flat_lat, flat_lon, forecast_days, model, timeout, requests, time):
+        """Query Open-Meteo for all points; return (speed, direction) of shape (n_points, n_hours) and times."""
+        speed = direction = None
+        times = None
+        chunk = 200  # locations per request (Open-Meteo accepts many; keep call count low)
+        n_chunks = (flat_lat.size + chunk - 1) // chunk
+        for ci, s in enumerate(range(0, flat_lat.size, chunk)):
+            sl = slice(s, s + chunk)
+            params = {
+                "latitude": ",".join(f"{v:.4f}" for v in flat_lat[sl]),
+                "longitude": ",".join(f"{v:.4f}" for v in flat_lon[sl]),
+                "hourly": "wind_speed_10m,wind_direction_10m",
+                "forecast_days": forecast_days,
+                "wind_speed_unit": "ms",
+            }
+            if model:
+                params["models"] = model
+            for attempt in range(6):  # exponential backoff on rate limiting / transient errors
+                r = requests.get("https://api.open-meteo.com/v1/forecast", params=params, timeout=timeout)
+                if r.status_code == 429 or r.status_code >= 500:
+                    time.sleep(2.0 * (attempt + 1))
+                    continue
+                r.raise_for_status()
+                break
+            else:
+                r.raise_for_status()
+            payload = r.json()
+            if isinstance(payload, dict):
+                payload = [payload]
+            for k, pt in enumerate(payload):
+                h = pt["hourly"]
+                if times is None:
+                    times = h["time"]
+                    speed = np.empty((flat_lat.size, len(times)))
+                    direction = np.empty_like(speed)
+                speed[s + k] = h["wind_speed_10m"]
+                direction[s + k] = h["wind_direction_10m"]
+            if ci < n_chunks - 1:
+                time.sleep(1.0)  # be gentle with the free endpoint
+        return speed, direction, times
+
     # ------------------------------------------------------------ interpolation
     def _cell(self, px, py):
         """Cell index and fractional position, clamped to the grid (edge extrapolation)."""
