@@ -71,8 +71,9 @@ def main():
     fig, axes = plt.subplots(1, ncol, figsize=(7.5 * ncol, 6.6), squeeze=False)
     ax = axes[0, 0]
     im = plot_wind_field(ax, wind, quiver_step=1)
-    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="wind speed" + ("" if args.raw else " (rescaled)"))
-    ax.set(title=f"Open-Meteo 10 m wind  {when} UTC\nlat {args.lat}, lon {args.lon}", xlabel="x", ylabel="y")
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label=f"wind speed (units; {m['ms_per_unit']} m/s each)")
+    ax.set(title=f"Open-Meteo 10 m wind  {when} UTC\n{m['km_per_unit']} km/unit, box {m['box_km'][0]}x{m['box_km'][1]} km",
+           xlabel="x", ylabel="y")
 
     if args.solve:
         # keep start/goal inside the real-data span on both axes (the box may be non-square)
