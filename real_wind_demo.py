@@ -35,8 +35,9 @@ def parse_args():
     ap.add_argument("--hour", type=int, default=0, help="forecast hour index")
     ap.add_argument("--forecast-days", type=int, default=2)
     ap.add_argument("--model", default=None, help="Open-Meteo model id, e.g. ecmwf_ifs025")
-    ap.add_argument("--max-speed", type=float, default=10.0, help="rescale peak wind to this (model units)")
-    ap.add_argument("--raw", action="store_true", help="keep real m/s instead of rescaling")
+    ap.add_argument("--domain-size", type=float, default=10.0, help="model units across the longer side")
+    ap.add_argument("--ref-speed", type=float, default=15.0, help="m/s that maps to wind_ref (=10) units")
+    ap.add_argument("--max-speed", type=float, default=None, help="instead rescale each field's peak to this")
     ap.add_argument("--seed", type=int, default=0, help="seed for the start/goal pair")
     ap.add_argument("--solve", action="store_true", help="also solve and draw the DP trajectory")
     ap.add_argument("--dp-nx", type=int, default=61)
@@ -53,13 +54,18 @@ def main():
     print(f"fetching Open-Meteo 10 m wind  lat={args.lat} lon={args.lon}  {args.nx}x{args.ny} grid ...")
     wind, times = WindField.from_openmeteo(
         args.lat, args.lon, nx=args.nx, ny=args.ny, hour=args.hour,
-        forecast_days=args.forecast_days, model=args.model,
-        max_speed=None if args.raw else args.max_speed, return_times=True,
+        forecast_days=args.forecast_days, model=args.model, domain_size=args.domain_size,
+        ref_speed=None if args.max_speed else args.ref_speed, max_speed=args.max_speed,
+        return_times=True,
     )
-    when = times[args.hour] if times else f"hour {args.hour}"
+    m = wind.meta
+    when = m["time"] or f"hour {args.hour}"
     sp = wind.speed
-    print(f"forecast time {when} UTC   speed min/mean/max = "
-          f"{sp.min():.1f}/{sp.mean():.1f}/{sp.max():.1f} {'m/s' if args.raw else '(rescaled)'}")
+    print(f"forecast time {when} UTC   model={m['model']}")
+    print(f"box {m['box_km'][0]}x{m['box_km'][1]} km  ->  domain span {m['domain_span']} units")
+    print(f"scales: {m['km_per_unit']} km/unit, {m['ms_per_unit']} (m/s)/unit   "
+          f"wind speed min/mean/max = {sp.min():.1f}/{sp.mean():.1f}/{sp.max():.1f} units "
+          f"= {sp.min()*m['ms_per_unit']:.1f}/{sp.mean()*m['ms_per_unit']:.1f}/{sp.max()*m['ms_per_unit']:.1f} m/s")
 
     ncol = 2 if args.solve else 1
     fig, axes = plt.subplots(1, ncol, figsize=(7.5 * ncol, 6.6), squeeze=False)
@@ -69,7 +75,9 @@ def main():
     ax.set(title=f"Open-Meteo 10 m wind  {when} UTC\nlat {args.lat}, lon {args.lon}", xlabel="x", ylabel="y")
 
     if args.solve:
-        env = ShipEnv(wind, params=params)
+        # keep start/goal inside the real-data span on both axes (the box may be non-square)
+        usable = min(wind.meta["domain_span"])
+        env = ShipEnv(wind, params=params, spawn_box=(0.5, usable - 0.5))
         env.reset(seed=args.seed)
         start, goal = env.state[:2].copy(), env.goal.copy()
         planner = ValueIterationPlanner(wind, goal, params=params, nx=args.dp_nx, ny=args.dp_ny)

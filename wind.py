@@ -27,7 +27,7 @@ LEGACY_FIELD_PATH = os.path.join(SCRIPT_DIR, "WF.pkl")
 class WindField:
     """Bilinear-interpolated 2D wind field on a uniform grid."""
 
-    def __init__(self, x, y, wx, wy):
+    def __init__(self, x, y, wx, wy, meta=None):
         self.x = np.asarray(x, dtype=np.float64)
         self.y = np.asarray(y, dtype=np.float64)
         self.wx = np.asarray(wx, dtype=np.float64)
@@ -39,6 +39,9 @@ class WindField:
         if not (np.allclose(np.diff(self.x), self.dx) and np.allclose(np.diff(self.y), self.dy)):
             raise ValueError("grid axes must be uniformly spaced")
         self._torch_cache = {}
+        # physical-scale metadata (km_per_unit, ms_per_unit, ...) for fields from real data;
+        # empty for synthetic/nondimensional fields. Lets you recover real units after a zoom.
+        self.meta = dict(meta or {})
 
     # ------------------------------------------------------------------ props
     @property
@@ -81,63 +84,70 @@ class WindField:
             return cls(f["x"], f["y"], f["wx"], f["wy"])
 
     # ----------------------------------------------------- real forecast data
+    EARTH_KM_PER_DEG = 111.32
+
     @classmethod
     def from_openmeteo(cls, lat_range, lon_range, nx=24, ny=24, hour=0,
-                       forecast_days=2, extent=(-1.0, 11.0), max_speed=None,
+                       forecast_days=2, domain_size=10.0, margin_frac=0.1,
+                       ref_speed=15.0, wind_ref=10.0, max_speed=None,
                        model=None, timeout=60, return_times=False):
         """
-        Build a WindField from Open-Meteo 10 m wind (no API key needed).
+        Build a WindField from Open-Meteo 10 m wind (no API key needed), NORMALISED so a
+        policy works at any zoom level.
 
         lat_range, lon_range : (min, max) degrees of the region to cover.
-        nx, ny               : grid resolution (nx along longitude -> x, ny along latitude -> y).
-        hour                 : index into the hourly forecast to use (0 = first hour).
-        max_speed            : if set, speeds are rescaled so the max equals this (the ship
-                               model saturates near 10 units); None keeps real m/s.
-        model                : optional Open-Meteo model id (e.g. "ecmwf_ifs025"); None = default.
-        return_times         : also return the list of hourly timestamps (for time-varying use).
+        nx, ny               : sample resolution (nx along longitude -> x, ny along latitude -> y).
+        hour                 : index into the hourly forecast to use.
 
-        Longitude maps to the x axis and latitude to the y axis, each linearly onto `extent`.
-        The two spans are mapped independently, so a non-square lat/lon box is stretched to a
-        square domain -- fine for a nondimensional study, note it if you need true distances.
-        Wind direction is meteorological ("from"), converted to (east, north) components.
+        Normalisation (this is what makes zoom-invariance work):
+          * Space: the region's *longer* physical side maps to `domain_size` model units via a
+            length scale L (km per unit); the shorter side keeps its true proportion (aspect is
+            preserved, not stretched). A `margin_frac*domain_size` border is added on each side.
+            Zooming in/out only changes L -- the ship always sees a `domain_size`-unit world.
+          * Wind: divide by a FIXED `ref_speed` (m/s) and multiply by `wind_ref` units, so
+            `ref_speed` m/s always maps to `wind_ref` units. Absolute severity is preserved and
+            two different regions / zoom levels are directly comparable. (Pass `max_speed`
+            instead to fall back to per-field peak rescaling.)
+
+        `field.meta` carries `km_per_unit`, `ms_per_unit`, the box size in km, the lat/lon box
+        and the forecast time, so you can always convert model units back to physical units.
+        `model` pins one Open-Meteo model (e.g. "ecmwf_ifs025", uniform 0.25 deg ~25 km);
+        None uses the default best-match blend (higher resolution near coasts).
         """
         import time
         import requests
 
-        lat0, lat1 = sorted(lat_range)
-        lon0, lon1 = sorted(lon_range)
-        lats = np.linspace(lat0, lat1, ny)
-        lons = np.linspace(lon0, lon1, nx)
+        x, y, L, wkm, hkm, mlat, spx, spy = cls._geo_axes(lat_range, lon_range, nx, ny,
+                                                          domain_size, margin_frac)
+        lats = np.linspace(*sorted(lat_range), ny)
+        lons = np.linspace(*sorted(lon_range), nx)
         LO, LA = np.meshgrid(lons, lats, indexing="ij")  # (nx, ny), lon first
-        flat_lat = LA.ravel()
-        flat_lon = LO.ravel()
-
         speed, direction, times = cls._fetch_openmeteo(
-            flat_lat, flat_lon, forecast_days, model, timeout, requests, time)
-        wx, wy = cls._build_components(speed[:, hour].reshape(nx, ny),
-                                       direction[:, hour].reshape(nx, ny), max_speed)
-        x = np.linspace(extent[0], extent[1], nx)
-        y = np.linspace(extent[0], extent[1], ny)
-        field = cls(x, y, wx, wy)
+            LA.ravel(), LO.ravel(), forecast_days, model, timeout, requests, time)
+        wx, wy = cls._uv(speed[:, hour].reshape(nx, ny), direction[:, hour].reshape(nx, ny))
+        wx, wy, ms_per_unit = cls._normalize_wind(wx, wy, max_speed, ref_speed, wind_ref)
+        meta = cls._geo_meta(L, ms_per_unit, wkm, hkm, lat_range, lon_range, mlat, spx, spy,
+                             times[hour] if times else None, model)
+        field = cls(x, y, wx, wy, meta=meta)
         return (field, times) if return_times else field
 
     @classmethod
     def from_openmeteo_sequence(cls, lat_range, lon_range, nx=24, ny=24, hours=None,
-                                forecast_days=2, extent=(-1.0, 11.0), max_speed=None,
+                                forecast_days=2, domain_size=10.0, margin_frac=0.1,
+                                ref_speed=15.0, wind_ref=10.0, max_speed=None,
                                 model=None, timeout=60):
         """
-        Fetch ONE Open-Meteo query and return a list of (timestamp, WindField) for the
-        given `hours` (default every 3 h over the horizon). This is the time-varying input
-        for a receding-horizon run: the same region sampled at successive forecast hours.
-        When `max_speed` is set the whole sequence is rescaled by one shared factor so the
-        fields stay comparable across time.
+        Fetch ONE Open-Meteo query and return a list of (timestamp, WindField) for the given
+        `hours` (default every 3 h). This is the time-varying input for a receding-horizon run.
+        Same normalisation as `from_openmeteo`: the fixed `ref_speed` (or one shared `max_speed`
+        factor) keeps every slice on the same scale so the fields are comparable across time.
         """
         import time
         import requests
-        lat0, lat1 = sorted(lat_range)
-        lon0, lon1 = sorted(lon_range)
-        lats = np.linspace(lat0, lat1, ny)
-        lons = np.linspace(lon0, lon1, nx)
+        x, y, L, wkm, hkm, mlat, spx, spy = cls._geo_axes(lat_range, lon_range, nx, ny,
+                                                          domain_size, margin_frac)
+        lats = np.linspace(*sorted(lat_range), ny)
+        lons = np.linspace(*sorted(lon_range), nx)
         LO, LA = np.meshgrid(lons, lats, indexing="ij")
         speed, direction, times = cls._fetch_openmeteo(
             LA.ravel(), LO.ravel(), forecast_days, model, timeout, requests, time)
@@ -145,33 +155,66 @@ class WindField:
         if hours is None:
             hours = list(range(0, n_hours, 3))
         hours = [h for h in hours if h < n_hours]
+        # one shared per-sequence peak scale only when using max_speed (ref_speed is already shared)
         shared = None
-        if max_speed is not None:  # one scale for the whole sequence
-            sp_all = np.hypot(*cls._build_components(speed[:, hours].reshape(nx, ny, -1),
-                                                     direction[:, hours].reshape(nx, ny, -1), None))
-            shared = max_speed / max(sp_all.max(), 1e-9)
-        x = np.linspace(extent[0], extent[1], nx)
-        y = np.linspace(extent[0], extent[1], ny)
+        if max_speed is not None and ref_speed is None:
+            wxa, wya = cls._uv(speed[:, hours].reshape(nx, ny, -1), direction[:, hours].reshape(nx, ny, -1))
+            shared = max_speed / max(np.hypot(wxa, wya).max(), 1e-9)
         out = []
         for h in hours:
-            wx, wy = cls._build_components(speed[:, h].reshape(nx, ny),
-                                           direction[:, h].reshape(nx, ny), None)
+            wx, wy = cls._uv(speed[:, h].reshape(nx, ny), direction[:, h].reshape(nx, ny))
             if shared is not None:
-                wx, wy = wx * shared, wy * shared
-            out.append((times[h] if times else h, cls(x, y, wx, wy)))
+                wx, wy, ms_per_unit = wx * shared, wy * shared, 1.0 / shared
+            else:
+                wx, wy, ms_per_unit = cls._normalize_wind(wx, wy, max_speed, ref_speed, wind_ref)
+            meta = cls._geo_meta(L, ms_per_unit, wkm, hkm, lat_range, lon_range, mlat, spx, spy,
+                                 times[h] if times else None, model)
+            out.append((times[h] if times else h, cls(x, y, wx, wy, meta=meta)))
         return out
 
     @staticmethod
-    def _build_components(speed, direction_deg, max_speed):
-        """Meteorological (speed, direction 'from') -> (east, north) components, optionally rescaled."""
+    def _uv(speed, direction_deg):
+        """Meteorological (speed, direction 'from') -> (east, north) velocity components."""
         d = np.deg2rad(np.nan_to_num(direction_deg))
         sp = np.nan_to_num(speed)
-        wx = -sp * np.sin(d)
-        wy = -sp * np.cos(d)
+        return -sp * np.sin(d), -sp * np.cos(d)
+
+    @staticmethod
+    def _normalize_wind(wx, wy, max_speed, ref_speed, wind_ref):
+        """Return rescaled (wx, wy) and the resulting m/s per model unit. max_speed (per-field
+        peak) takes precedence; else ref_speed maps ref_speed m/s -> wind_ref units; else raw."""
         if max_speed is not None:
-            s = max_speed / max(np.hypot(wx, wy).max(), 1e-9)
-            wx, wy = wx * s, wy * s
-        return wx, wy
+            peak = max(np.hypot(wx, wy).max(), 1e-9)
+            return wx * (max_speed / peak), wy * (max_speed / peak), peak / max_speed
+        if ref_speed is not None:
+            s = wind_ref / ref_speed
+            return wx * s, wy * s, ref_speed / wind_ref
+        return wx, wy, 1.0
+
+    @classmethod
+    def _geo_axes(cls, lat_range, lon_range, nx, ny, domain_size, margin_frac):
+        """Aspect-preserving model axes for a lat/lon box: the longer physical side spans
+        `domain_size` units. Returns x, y, L (km/unit), width_km, height_km, mean_lat, span_x, span_y."""
+        lat0, lat1 = sorted(lat_range)
+        lon0, lon1 = sorted(lon_range)
+        mean_lat = 0.5 * (lat0 + lat1)
+        width_km = (lon1 - lon0) * cls.EARTH_KM_PER_DEG * np.cos(np.deg2rad(mean_lat))
+        height_km = (lat1 - lat0) * cls.EARTH_KM_PER_DEG
+        L = max(width_km, height_km) / domain_size  # km per model unit (from the longer side)
+        span_x, span_y = width_km / L, height_km / L
+        m = margin_frac * domain_size
+        x = np.linspace(-m, span_x + m, nx)
+        y = np.linspace(-m, span_y + m, ny)
+        return x, y, L, width_km, height_km, mean_lat, span_x, span_y
+
+    @staticmethod
+    def _geo_meta(L, ms_per_unit, wkm, hkm, lat_range, lon_range, mean_lat, spx, spy, t, model):
+        return dict(source="open-meteo", km_per_unit=round(float(L), 3),
+                    ms_per_unit=round(float(ms_per_unit), 4),
+                    box_km=(round(float(wkm), 1), round(float(hkm), 1)),
+                    domain_span=(round(float(spx), 2), round(float(spy), 2)),
+                    lat_range=tuple(sorted(lat_range)), lon_range=tuple(sorted(lon_range)),
+                    mean_lat=round(float(mean_lat), 3), time=t, model=model or "best_match")
 
     @staticmethod
     def _fetch_openmeteo(flat_lat, flat_lon, forecast_days, model, timeout, requests, time):
