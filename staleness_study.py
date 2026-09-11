@@ -68,6 +68,10 @@ def parse_args():
     ap.add_argument("--max-steps", type=int, default=400)
     ap.add_argument("--device", default=None)
     ap.add_argument("--regions", nargs="+", default=list(REGIONS))
+    ap.add_argument("--replan", action="store_true",
+                    help="add a re-planning DP condition: re-solve on a refreshed map every "
+                         "--replan-every-min. Tests whether the stale-forecast cost is recoverable.")
+    ap.add_argument("--replan-every-min", type=float, default=180.0)
     return ap.parse_args()
 
 
@@ -150,6 +154,22 @@ def main():
 
                 pol = simulate(policy, start, goal, evolving, params, goal_radius, args.max_steps)
 
+                rep = None
+                if args.replan:
+                    solves = {}
+
+                    def replanning(state, field):
+                        key = id(field)
+                        if key not in solves:
+                            pp = ValueIterationPlanner(field, goal, params=params, nx=args.dp_nx,
+                                                       ny=args.dp_ny, device=args.device)
+                            pp.solve(verbose=False)
+                            solves[key] = pp
+                        return solves[key].act(state)
+
+                    rep = simulate(replanning, start, goal, evolving, params, goal_radius,
+                                   args.max_steps, refresh_min=args.replan_every_min)
+
                 row = dict(region=rname, departure_h=dep, route=ri,
                            km_per_unit=meta["km_per_unit"], hours_per_unit=sec_per_tu / 3600,
                            dp_solve_s=round(st["time"], 2),
@@ -161,13 +181,22 @@ def main():
                            pol_h=round(pol["hours"], 2))
                 row["stale_cost"] = ((stale["J"] / oracle["J"] - 1) if (oracle["success"] and stale["success"]) else np.nan)
                 row["policy_gap"] = ((pol["J"] / oracle["J"] - 1) if (oracle["success"] and pol["success"]) else np.nan)
+                if rep is not None:
+                    row["replan_ok"] = int(rep["success"])
+                    row["replan_J"] = round(rep["J"], 3)
+                    row["replan_gap"] = ((rep["J"] / oracle["J"] - 1)
+                                         if (oracle["success"] and rep["success"]) else np.nan)
+                    row["replan_vs_stale"] = ((rep["J"] / stale["J"] - 1)
+                                              if (stale["success"] and rep["success"]) else np.nan)
                 rows.append(row)
                 print(f"  dep+{dep:2d}h route{ri}: oracle {'ok' if oracle['success'] else 'FAIL'} "
                       f"J={oracle['J']:5.2f} ({oracle['hours']:4.1f}h) | stale "
                       f"{'ok' if stale['success'] else 'FAIL'} J={stale['J']:5.2f} "
                       f"({row['stale_cost'] * 100:+5.1f}%) | policy "
                       f"{'ok' if pol['success'] else 'FAIL'} J={pol['J']:5.2f} "
-                      f"({row['policy_gap'] * 100:+5.1f}%)", flush=True)
+                      f"({row['policy_gap'] * 100:+5.1f}%)"
+                      + (f" | replan J={rep['J']:5.2f} ({row['replan_gap'] * 100:+5.1f}%)"
+                         if rep is not None else ""), flush=True)
 
         write_csv(rows)  # after every region, so a later failure cannot lose the study
 
@@ -199,7 +228,16 @@ def summarise(rows, args):
     print(f"cases: {n}   (regions x departure times x routes)")
     print(f"arrival rate  oracle {ok('oracle_ok').mean()*100:3.0f}%   "
           f"stale plan {ok('stale_ok').mean()*100:3.0f}%   policy {ok('pol_ok').mean()*100:3.0f}%")
-    for name, v in (("cost of a STALE forecast", stale_cost), ("policy gap (zero-shot, real wind)", policy_gap)):
+    series = [("cost of a STALE forecast", stale_cost), ("policy gap (zero-shot, real wind)", policy_gap)]
+    if "replan_gap" in rows[0]:
+        series.append(("re-planning DP gap", np.array([r.get("replan_gap", np.nan) for r in rows], dtype=float)))
+        rvs = np.array([r.get("replan_vs_stale", np.nan) for r in rows], dtype=float)
+        rvs = rvs[np.isfinite(rvs)]
+        if rvs.size:
+            better = (rvs < 0).mean() * 100
+            print(f"re-planning vs the stale plan: median {np.median(rvs)*100:+.1f}%  "
+                  f"(re-planning was cheaper in {better:.0f}% of cases)")
+    for name, v in series:
         v = v[np.isfinite(v)]
         if v.size:
             print(f"{name:34s} median {np.median(v)*100:+5.1f}%   mean {v.mean()*100:+5.1f}%   "

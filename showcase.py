@@ -26,6 +26,7 @@ from dynamics import ShipParams
 from env import ShipEnv
 from dp_baseline import ValueIterationPlanner
 from scenarios import SCENARIOS, build
+from viz import windy_cmap, windy_norm, wind_scale_ticks
 
 # Anchor all paths to this script's location
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -43,7 +44,7 @@ def parse_args():
     ap.add_argument("--nx", type=int, default=71)
     ap.add_argument("--ny", type=int, default=71)
     ap.add_argument("--nv", type=int, default=13)
-    ap.add_argument("--cmap", default="magma")
+    ap.add_argument("--cmap", default="windy", help="'windy' for the Windy-style scale, or any matplotlib cmap")
     ap.add_argument("--fps", type=int, default=20)
     ap.add_argument("--device", default=None)
     return ap.parse_args()
@@ -61,8 +62,12 @@ def deviation(traj, start, goal):
 def paint(ax, wind, cmap="magma", density=1.5, lw_scale=2.2):
     """Speed shading + streamlines, weather-map style. Returns the mesh."""
     sp = wind.speed
-    im = ax.pcolormesh(wind.x, wind.y, sp.T, shading="gouraud", cmap=cmap,
-                       vmin=0, vmax=max(10.0, float(sp.max())))
+    if cmap == "windy":   # anchored to m/s so the same colour always means the same wind
+        im = ax.pcolormesh(wind.x, wind.y, sp.T, shading="gouraud",
+                           cmap=windy_cmap(), norm=windy_norm(1.0))
+    else:
+        im = ax.pcolormesh(wind.x, wind.y, sp.T, shading="gouraud", cmap=cmap,
+                           vmin=0, vmax=max(10.0, float(sp.max())))
     # streamplot wants (y, x) indexed arrays
     lw = lw_scale * (sp.T / max(sp.max(), 1e-9)) ** 1.4 + 0.15
     ax.streamplot(wind.x, wind.y, wind.wx.T, wind.wy.T, color="white", density=density,
@@ -104,7 +109,10 @@ def still(case, args):
     ax.set_facecolor("#04121f")
     im = paint(ax, case["wind"], cmap=args.cmap)
     cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
-    cb.set_label("wind speed", color="white")
+    cb.set_label("wind speed (m/s equivalent)", color="white")
+    if args.cmap == "windy":
+        ticks, labels = wind_scale_ticks(1.0)
+        cb.set_ticks(ticks); cb.set_ticklabels(labels)
     cb.ax.yaxis.set_tick_params(color="white")
     plt.setp(plt.getp(cb.ax.axes, "yticklabels"), color="white")
     draw_track(ax, case["res"]["traj"], label="optimal route")
