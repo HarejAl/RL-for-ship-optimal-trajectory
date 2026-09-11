@@ -113,13 +113,44 @@ Cost of planning once at departure and never looking again:
 | --- | --- | --- | --- | --- |
 | Stale forecast penalty | +1.6% | +3.6% | +22.1% | **+48.8%** |
 
-The honest reading, and the interesting one: **most of the time it barely matters, and
-occasionally it costs you half again as much** — and you cannot tell at departure which kind
-of day you are having. That is the argument for a policy that re-reads the map continuously,
-given that adapting costs ~1 ms and re-solving costs seconds.
-
-Note the distribution is two-sided: sometimes the weather *improves* and the voyage comes in
+The distribution is two-sided: sometimes the weather *improves* and the voyage comes in
 cheaper than the departure forecast promised (down to -35%).
+
+### The correction: that swing is NOT recoverable — do not claim adaptivity fixes it
+
+The tempting conclusion is "therefore you must re-read the map and re-plan". **I tested it
+and that conclusion is wrong.** Three conditions on the same 27 voyages
+(`staleness_study.py --replan`, 3 Atlantic regions x 3 departures x 3 routes):
+
+| Condition, cost vs the departure-forecast optimum | Median | Mean | p90 |
+| --- | --- | --- | --- |
+| Stale plan (never looks again) | +0.8% | +3.1% | +22.0% |
+| Learned policy, re-reading the map | -0.2% | +2.5% | +23.2% |
+| **Re-planning DP (fresh solve every 3 h)** | **+0.0%** | **+3.7%** | **+25.7%** |
+
+The decisive number: **re-planning beat the stale plan in 52% of cases — a coin flip**
+(median -0.1%). Ten fresh DP solves per voyage buy nothing. A refresh-cadence sweep
+(`--sweep`, `output/refresh_sweep.png`) from live to 30 min to 12 h to never is likewise flat.
+
+A single vivid example (Bay of Biscay, weather worsened): stale +30.3%, learned policy
++31.6%, re-planning DP **+37.1%** after 10 fresh solves.
+
+(The policy's -0.2% median does **not** mean it beats DP. The reference is DP's cost under
+*frozen* weather; real weather moves both ways, so all three conditions sit near zero.)
+
+Why: when the weather turns, the extra cost is mostly the *environment being rougher*, not a
+decision-making error. There is no better route to find. And re-solving on a frozen snapshot
+each time is myopic — it optimises for weather it assumes will hold, which can be worse than
+the original plan.
+
+**So the defensible Act 5 is narrower than "you must re-plan":**
+weather evolution moves your voyage cost by a median 1.6% and occasionally ~50%, in both
+directions, and that movement is largely irreducible. The value of the learned policy is
+**amortised DP-quality routing at ~1 ms on whatever map it is given** — not adaptive recovery.
+
+If someone asks "so why read the map at all?", the answer is Act 3-4: reading the map is worth
+a **34% -> 3.5%** cost gap versus a wind-blind agent. That is where the value is, and it is
+large. What the evidence does not support is an extra claim about adapting to change.
 
 ---
 
@@ -149,7 +180,12 @@ cheaper than the departure forecast promised (down to -35%).
 
 ## A methodological point worth one slide
 
-Two results in this project were nearly reported wrongly, and a control caught each:
+Three results in this project were nearly reported wrongly, and a control caught each:
+
+- The whole "adaptive routing beats stale plans" story (Act 5). A refresh-cadence sweep
+  looked inconclusive, so I added a re-planning DP control — which showed the cost of a
+  weather change is essentially irreducible. Without that control the talk would have
+  claimed a benefit that does not exist.
 
 - A dramatic "the fixed plan gets blown off course by the mistral, the adaptive policy
   survives" case. Running the same plan under the weather it *assumed* showed it failed

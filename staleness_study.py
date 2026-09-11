@@ -204,7 +204,7 @@ def main():
         print("no cases completed")
         return
     summarise(rows, args)
-    print(f"\nsaved {out_csv}   (total {(time.perf_counter() - t_start) / 60:.1f} min)")
+    print(f"\nsaved {write_csv(rows)}   (total {(time.perf_counter() - t_start) / 60:.1f} min)")
 
 
 def write_csv(rows):
