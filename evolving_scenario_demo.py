@@ -10,7 +10,7 @@ The agent is handed a refreshed map every `--update-every-min` minutes and holds
 the next update, exactly as an operational forecast feed would work.
 
     python evolving_scenario_demo.py --model models/bc_t2.zip
-    python evolving_scenario_demo.py --scenario front --update-every-min 60
+    python evolving_scenario_demo.py --scenario front --update-every-min 60 --front-x-end 8.3
 
 Outputs: output/evolving_<scenario>.gif and output/evolving_<scenario>_panels.png
 """
@@ -45,11 +45,14 @@ def parse_args():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default="models/bc_t2.zip")
     ap.add_argument("--scenario", default="storm", choices=["storm", "front"],
-                    help="'storm' is the presentable one; 'front' is currently not navigable (see its docstring)")
+                    help="'storm': a cyclone tracks across the route. 'front': a gale front builds and "
+                         "advances, and the ship must round its eastern end.")
     ap.add_argument("--slices", type=int, default=49, help="map snapshots over the window")
     ap.add_argument("--window-h", type=float, default=24.0, help="real hours the window spans")
     ap.add_argument("--update-every-min", type=float, default=90.0)
     ap.add_argument("--ms-per-unit", type=float, default=2.5)
+    ap.add_argument("--front-x-end", type=float, default=8.3,
+                    help="eastern end of the front: the direct line must cross it, with a corridor beyond")
     ap.add_argument("--start", type=float, nargs=2, default=[0.8, 1.0])
     ap.add_argument("--goal", type=float, nargs=2, default=[9.2, 9.0])
     ap.add_argument("--max-steps", type=int, default=500)
@@ -71,22 +74,29 @@ def moving_storm(frac, seed=11):
     return WindField(x, y, wx + vx, wy + vy)
 
 
-def building_front(frac, seed=31):
+def building_front(frac, seed=31, x_end=8.3, taper=2.0):
     """
-    A gale front that builds and advances from the north across the route.
+    A gale front that builds and advances south, but only across the WESTERN part of the
+    domain: east of `x_end` there is an open corridor. The ship has to commit east early and
+    run up the clear flank instead of punching through.
 
-    KNOWN LIMITATION: the front spans the full width with the destination beyond it, so the
-    ship has to punch through rather than route around, and at any strength that makes the
-    front worth avoiding neither ship arrives. Use `storm` for presentation material until
-    this is reworked (put the goal on the near side, or leave a passable flank).
+    At departure the front barely exists, so a planner sees a clear diagonal and commits to
+    it; the front then builds across that route and the fixed plan is stranded, while an
+    agent re-reading the map bears east and rounds the end. The `--front-x-end` position is
+    what makes this a routing problem: too far west and the direct line never crosses the
+    front (nothing to avoid), too far east and the corridor closes (nothing can arrive).
+
+    (An earlier version was a function of Y alone, so it spanned the full width with the
+    destination beyond it. At any strength worth avoiding, nothing could ever arrive -- a
+    blocked scenario, not a hard one.)
     """
     x, y, X, Y = _grid()
     wx, wy = _background(seed, amp=1.1)
-    # kept below the ship's ~7.5-unit headwind limit for most of the window: the front must be
-    # worth avoiding, not an impassable wall (at 11 units neither ship ever arrives)
-    edge = 9.5 - 6.0 * frac                       # front edge marches south
-    strength = 3.0 + 4.5 * min(1.0, frac * 1.6)   # and deepens
-    f = 1.0 / (1.0 + np.exp(-(Y - edge) * 2.4))
+    edge = 9.6 - 6.8 * frac                       # front edge marches south
+    strength = 4.0 + 6.0 * min(1.0, frac * 1.5)   # and deepens past the ~7.5 headwind limit
+    f_y = 1.0 / (1.0 + np.exp(-(Y - edge) * 2.4))  # north of the edge
+    f_x = 1.0 / (1.0 + np.exp((X - x_end) * taper))  # dies away east of x_end
+    f = f_y * f_x
     return WindField(x, y, wx - strength * f, wy + 0.25 * strength * f)
 
 
@@ -99,6 +109,8 @@ def main():
     params = ShipParams()
     start, goal = np.array(args.start), np.array(args.goal)
     build = BUILDERS[args.scenario]
+    if args.scenario == "front":
+        build = lambda f: building_front(f, x_end=args.front_x_end)
 
     # snapshots across the window, labelled with a synthetic clock
     slices = []
@@ -143,6 +155,19 @@ def main():
     plan = simulate(lambda s, f: planner.act(s), start, goal, evolving, params,
                     goal_radius, args.max_steps)
     print(f"departure plan: {'ARRIVED' if plan['success'] else 'did not arrive'}  J={plan['J']:.2f}")
+
+    # CONTROL: the same plan under the weather it assumed. If this arrives while the run above
+    # does not, the weather changing is genuinely what broke it -- not a plan that never worked.
+    still = EvolvingWind([slices[0], slices[0]], sec_per_tu)
+    held = simulate(lambda s, f: planner.act(s), start, goal, still, params,
+                    goal_radius, args.max_steps)
+    print(f"  control, same plan with weather HELD: "
+          f"{'ARRIVED' if held['success'] else 'did not arrive'}  J={held['J']:.2f}")
+    if held["success"] and not plan["success"]:
+        print("  => the departure plan was valid for the forecast it had; the front appearing broke it.")
+    elif not held["success"]:
+        print("  => WARNING: the plan fails even under held weather, so this scenario does not "
+              "demonstrate anything about forecast staleness.")
 
     animate(evolving, start, goal, goal_radius, run, plan, params, args)
     panels(evolving, start, goal, run, plan, params, args)
