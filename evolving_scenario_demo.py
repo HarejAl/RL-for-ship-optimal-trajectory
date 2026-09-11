@@ -44,17 +44,23 @@ TRACK = "#00f5d4"
 def parse_args():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default="models/bc_t2.zip")
-    ap.add_argument("--scenario", default="storm", choices=["storm", "front"],
+    ap.add_argument("--scenario", default="storm", choices=["storm", "front", "surf", "pair"],
                     help="'storm': a cyclone tracks across the route. 'front': a gale front builds and "
-                         "advances, and the ship must round its eastern end.")
+                         "advances, and the ship must round its eastern end. 'surf': ride a "
+                         "drifting cyclone's tailwind flank instead of fighting a headwind. "
+                         "'pair': a drifting counter-rotating pair the agent must swing around.")
     ap.add_argument("--slices", type=int, default=49, help="map snapshots over the window")
     ap.add_argument("--window-h", type=float, default=24.0, help="real hours the window spans")
     ap.add_argument("--update-every-min", type=float, default=90.0)
     ap.add_argument("--ms-per-unit", type=float, default=2.5)
+    ap.add_argument("--drift", type=float, default=1.4,
+                    help="'pair': how far east the cyclone pair drifts during the voyage")
     ap.add_argument("--front-x-end", type=float, default=8.3,
                     help="eastern end of the front: the direct line must cross it, with a corridor beyond")
     ap.add_argument("--start", type=float, nargs=2, default=[0.8, 1.0])
     ap.add_argument("--goal", type=float, nargs=2, default=[9.2, 9.0])
+    ap.add_argument("--show-plan", action="store_true",
+                    help="also draw the fixed departure plan. Off by default: the agent alone is clearer.")
     ap.add_argument("--max-steps", type=int, default=500)
     ap.add_argument("--dp-nx", type=int, default=61)
     ap.add_argument("--dp-ny", type=int, default=61)
@@ -100,7 +106,56 @@ def building_front(frac, seed=31, x_end=8.3, taper=2.0):
     return WindField(x, y, wx - strength * f, wy + 0.25 * strength * f)
 
 
-BUILDERS = {"storm": moving_storm, "front": building_front}
+def surf_storm(frac, seed=7):
+    """
+    A cyclone drifting east whose SOUTHERN flank is an eastbound tailwind conveyor, with a
+    band of adverse westerly along the direct line. The clever move is counter-intuitive:
+    steer TOWARDS the storm and ride its flank instead of grinding straight into the headwind.
+
+    Cyclonic (counter-clockwise) rotation means the flow south of the centre points east, so
+    a vortex placed north of the rhumb line hands an eastbound ship a free ride.
+
+    MEASURED OUTCOME: DP finds the ride (33% detour, climbing to y=5.5) but **the learned
+    policy does not** -- it grinds along the rhumb line (max y ~2.6 at every strength tried).
+    The favourable flank sits ~2.5 units away, outside the policy's local crop, and the
+    coarse global channel evidently is not enough to trigger a commitment *away* from the
+    goal. Keep this scenario as a known failure mode, not as a demo: it shows the clone
+    imitating DP locally without inheriting its long-range, counter-intuitive decisions.
+    """
+    x, y, X, Y = _grid()
+    wx, wy = _background(seed, amp=1.2)
+    cx = 2.2 + 5.6 * frac            # the storm travels east with the ship
+    cy = 7.4
+    vx, vy = _vortex(X, Y, cx, cy, 2.6, 9.5)     # +ve = counter-clockwise
+    wx += vx
+    wy += vy
+    adverse = np.exp(-0.5 * ((Y - 2.6) / 1.7) ** 2)   # headwind along the direct line
+    wx += -5.0 * adverse
+    return WindField(x, y, wx, wy)
+
+
+def drifting_pair(frac, seed=3, drift=1.4):
+    """
+    A counter-rotating cyclone pair that BLOCKS the direct line and drifts east as the ship
+    sails. The agent has to commit to a large swing around the north of the pair and keep
+    adjusting it as the obstacle moves.
+
+    Chosen because it is the scenario where the learned policy most faithfully reproduces the
+    optimal detour (56% vs DP's 58% on the static version), so the clever decision on screen
+    is the agent's own, not a plan drawn for it.
+    """
+    x, y, X, Y = _grid()
+    wx, wy = _background(seed, amp=1.2)
+    for (cx, cy, st) in ((4.6 + drift * frac, 7.6, -10.0),
+                         (5.4 + drift * frac, 2.4, 10.0)):
+        vx, vy = _vortex(X, Y, cx, cy, 2.3, st)
+        wx += vx
+        wy += vy
+    return WindField(x, y, wx, wy)
+
+
+BUILDERS = {"storm": moving_storm, "front": building_front, "surf": surf_storm,
+            "pair": drifting_pair}
 
 
 def main():
@@ -111,6 +166,8 @@ def main():
     build = BUILDERS[args.scenario]
     if args.scenario == "front":
         build = lambda f: building_front(f, x_end=args.front_x_end)
+    elif args.scenario == "pair":
+        build = lambda f: drifting_pair(f, drift=args.drift)
 
     # snapshots across the window, labelled with a synthetic clock
     slices = []
@@ -148,26 +205,29 @@ def main():
           f"voyage={run['hours']:.1f} h  steps={run['steps']}  "
           f"(map refreshed every {args.update_every_min:g} min)")
 
-    # a departure plan for contrast: DP on the map available at t=0, then followed
-    planner = ValueIterationPlanner(slices[0][1], goal, params=params, nx=args.dp_nx,
-                                    ny=args.dp_ny, device=args.device)
-    planner.solve(verbose=False)
-    plan = simulate(lambda s, f: planner.act(s), start, goal, evolving, params,
-                    goal_radius, args.max_steps)
-    print(f"departure plan: {'ARRIVED' if plan['success'] else 'did not arrive'}  J={plan['J']:.2f}")
+    plan = None
+    if args.show_plan:
+        # a departure plan for contrast: DP on the map available at t=0, then followed
+        planner = ValueIterationPlanner(slices[0][1], goal, params=params, nx=args.dp_nx,
+                                        ny=args.dp_ny, device=args.device)
+        planner.solve(verbose=False)
+        plan = simulate(lambda s, f: planner.act(s), start, goal, evolving, params,
+                        goal_radius, args.max_steps)
+        print(f"departure plan: {'ARRIVED' if plan['success'] else 'did not arrive'}  J={plan['J']:.2f}")
 
     # CONTROL: the same plan under the weather it assumed. If this arrives while the run above
     # does not, the weather changing is genuinely what broke it -- not a plan that never worked.
-    still = EvolvingWind([slices[0], slices[0]], sec_per_tu)
-    held = simulate(lambda s, f: planner.act(s), start, goal, still, params,
-                    goal_radius, args.max_steps)
-    print(f"  control, same plan with weather HELD: "
-          f"{'ARRIVED' if held['success'] else 'did not arrive'}  J={held['J']:.2f}")
-    if held["success"] and not plan["success"]:
-        print("  => the departure plan was valid for the forecast it had; the front appearing broke it.")
-    elif not held["success"]:
-        print("  => WARNING: the plan fails even under held weather, so this scenario does not "
-              "demonstrate anything about forecast staleness.")
+    if args.show_plan:
+        still = EvolvingWind([slices[0], slices[0]], sec_per_tu)
+        held = simulate(lambda s, f: planner.act(s), start, goal, still, params,
+                        goal_radius, args.max_steps)
+        print(f"  control, same plan with weather HELD: "
+              f"{'ARRIVED' if held['success'] else 'did not arrive'}  J={held['J']:.2f}")
+        if held["success"] and not plan["success"]:
+            print("  => the departure plan was valid for the forecast it had; the weather broke it.")
+        elif not held["success"]:
+            print("  => WARNING: the plan fails even under held weather, so this scenario does not "
+                  "demonstrate anything about forecast staleness.")
 
     animate(evolving, start, goal, goal_radius, run, plan, params, args)
     panels(evolving, start, goal, run, plan, params, args)
@@ -183,7 +243,7 @@ def _paint(ax, field, ms_per_unit, step=5):
 
 
 def animate(evolving, start, goal, goal_radius, run, plan, params, args):
-    n = max(len(run["traj"]), len(plan["traj"]))
+    n = max(len(run["traj"]), len(plan["traj"]) if plan is not None else 0)
     frames = (n + args.stride - 1) // args.stride
     f0 = evolving.at(0.0)
     fig, ax = plt.subplots(figsize=(7.4, 7.0), facecolor="#04121f")
@@ -200,11 +260,14 @@ def animate(evolving, start, goal, goal_radius, run, plan, params, args):
     ax.plot(*start, "o", color="white", mec="#04121f", mew=1.5, ms=10, zorder=8)
     ax.plot(*goal, "*", color="#ffd166", mec="#04121f", mew=1.2, ms=22, zorder=8)
     ax.add_patch(plt.Circle(goal, goal_radius, fill=False, ec="#ffd166", lw=1.3, ls=":", zorder=7))
+    show_plan = plan is not None
     (l_plan,) = ax.plot([], [], color="#ff5d5d", lw=2.3, ls="--", zorder=6, path_effects=GLOW,
-                        label="plan fixed at departure")
+                        label="plan fixed at departure" if show_plan else None)
+    l_plan.set_visible(show_plan)
     (l_run,) = ax.plot([], [], color=TRACK, lw=3.0, zorder=6, path_effects=GLOW,
-                       label="agent, map refreshed", solid_capstyle="round")
+                       label="agent, re-reading the refreshed map", solid_capstyle="round")
     (d_plan,) = ax.plot([], [], "o", color="#ff5d5d", mec="#04121f", mew=1.4, ms=11, zorder=9)
+    d_plan.set_visible(show_plan)
     (d_run,) = ax.plot([], [], "o", color=TRACK, mec="#04121f", mew=1.4, ms=13, zorder=9)
     xmin, xmax, ymin, ymax = f0.extent
     ax.set(xlim=(xmin, xmax), ylim=(ymin, ymax))
@@ -229,7 +292,8 @@ def animate(evolving, start, goal, goal_radius, run, plan, params, args):
         field = evolving.at(t_shown)
         im.set_array(field.speed.T.ravel())
         q.set_UVC(field.wx[::5, ::5], field.wy[::5, ::5])
-        for res, line, dot in ((plan, l_plan, d_plan), (run, l_run, d_run)):
+        pairs = [(run, l_run, d_run)] + ([(plan, l_plan, d_plan)] if show_plan else [])
+        for res, line, dot in pairs:
             j = min(i, len(res["traj"]) - 1)
             line.set_data(res["traj"][:j + 1, 0], res["traj"][:j + 1, 1])
             dot.set_data([res["traj"][j, 0]], [res["traj"][j, 1]])
@@ -247,12 +311,13 @@ def animate(evolving, start, goal, goal_radius, run, plan, params, args):
 def panels(evolving, start, goal, run, plan, params, args):
     n = len(run["traj"])
     picks = [0, n // 3, 2 * n // 3, n - 1]
+    pairs = [(run, TRACK, "-", 2.6)] + ([(plan, "#ff5d5d", "--", 2.0)] if plan is not None else [])
     fig, axes = plt.subplots(1, 4, figsize=(20, 5.4), facecolor="#04121f")
     for ax, i in zip(axes, picks):
         t_model = i * params.dt
         im, _ = _paint(ax, evolving.at(t_model), args.ms_per_unit, step=6)
         ax.set_facecolor("#04121f")
-        for res, c, ls, lw in ((plan, "#ff5d5d", "--", 2.0), (run, TRACK, "-", 2.6)):
+        for res, c, ls, lw in pairs:
             j = min(i, len(res["traj"]) - 1)
             ax.plot(res["traj"][:j + 1, 0], res["traj"][:j + 1, 1], color=c, ls=ls, lw=lw,
                     path_effects=GLOW)
@@ -264,8 +329,9 @@ def panels(evolving, start, goal, run, plan, params, args):
         ax.set_yticks([])
         for s in ax.spines.values():
             s.set_color("#2a4a63")
-    fig.suptitle("Wind map evolving during the crossing:  red = plan fixed at departure,  "
-                 "cyan = agent re-reading the refreshed map", color="white", fontsize=14)
+    sub = ("red = plan fixed at departure,  cyan = agent re-reading the refreshed map"
+           if plan is not None else "the agent re-reads the refreshed map as the weather changes")
+    fig.suptitle(f"Wind map evolving during the crossing:  {sub}", color="white", fontsize=14)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     out = os.path.join(OUTPUT_DIR, f"evolving_{args.scenario}_panels.png")
     fig.savefig(out, dpi=130, facecolor=fig.get_facecolor())
