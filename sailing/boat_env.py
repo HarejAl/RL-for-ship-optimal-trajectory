@@ -8,6 +8,9 @@ side expensive is the explicit manoeuvre penalty -- a tack or gybe costs `tack_t
 every step, since a sailboat can approximate any heading inside the no-go zone by switching
 tacks infinitely fast.
 
+While a tack or gybe is being served the heading is locked: commands are ignored until the
+manoeuvre is complete.
+
 Observation : [x, y, cos h, sin h, xg, yg]    (float32; h = current heading)
 Action      : absolute heading, radians, shape (1,)
 Reward      : -dt per step (minimum time), + goal_bonus on arrival, - oob_penalty on leaving
@@ -126,6 +129,12 @@ class SailEnv(gym.Env):
         p = self.p
         x, y, h_old = self.state
         h_new = float(np.asarray(action, dtype=np.float64).reshape(-1)[0])
+        if self.pending > 1e-12:
+            # A manoeuvre is still in progress: the boat completes it on the heading it committed
+            # to. Without this lock a policy that re-decides every step can start a new tack
+            # before the last one finishes and pile up penalty time without ever moving -- the
+            # time-dependent DP did exactly that dead downwind of the goal (918 tacks).
+            h_new = float(h_old)
         field = self.wind_at(self.t)
         wx, wy = field(x, y)
         wx, wy = float(wx), float(wy)

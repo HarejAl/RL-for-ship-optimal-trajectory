@@ -147,3 +147,70 @@ def test_planners_agree_on_random_field(polar):
     i = rollout(SailEnv(wf, polar, p), route_follower(iso, polar, p), s, g)
     assert d["success"] and i["success"]
     assert abs(i["t"] - d["t"]) / d["t"] < 0.10, (i["t"], d["t"])
+
+
+# ------------------------------------------------------- time-varying wind
+from sailing.wind_seq import WindSequence, sail_params_for  # noqa: E402
+from sailing.dp_time import SailDPTime  # noqa: E402
+
+
+def test_wind_sequence_interpolates_in_time():
+    a = uniform_wind_field(wx=2.0, wy=0.0, nx=11, ny=11)
+    b = uniform_wind_field(wx=6.0, wy=-4.0, nx=11, ny=11)
+    seq = WindSequence([0.0, 10.0], [a, b])
+    wx, wy = seq.at(2.5)(5.0, 5.0)
+    assert np.isclose(wx, 3.0) and np.isclose(wy, -1.0)
+    assert np.isclose(seq.at(-5.0)(5.0, 5.0)[0], 2.0)      # clamped before the first slice
+    assert np.isclose(seq.at(99.0)(5.0, 5.0)[0], 6.0)      # and after the last
+
+
+def test_sail_params_from_forecast_meta():
+    p = sail_params_for(dict(km_per_unit=92.6, ms_per_unit=2.5))
+    assert np.isclose(p.nm_per_unit, 50.0)
+    assert np.isclose(p.kts_per_wind_unit, 2.5 / 0.514444)
+
+
+def test_time_dp_matches_static_dp_in_steady_wind(polar):
+    """With wind constant in time, backward induction must reproduce the static DP voyage."""
+    p = SailParams()
+    wf = generate_wind_field(4)
+    s, g = np.array([1.0, 1.0]), np.array([8.5, 8.0])
+    st = SailDP(wf, polar, p, g, nx=61, ny=61, device="cpu")
+    st.solve()
+    ref = rollout(SailEnv(wf, polar, p), st.policy(), s, g)
+    seq = WindSequence.constant(wf, 60.0)
+    td = SailDPTime(seq, polar, p, g, nx=61, ny=61, device="cpu")
+    td.solve()
+    res = rollout(SailEnv(wind_fn=seq, polar=polar, params=p), td.policy(), s, g)
+    assert ref["success"] and res["success"]
+    assert abs(res["t"] - ref["t"]) / ref["t"] < 0.03, (res["t"], ref["t"])
+
+
+def test_time_dp_uses_the_forecast():
+    """Wind that swings from northerly to southerly: a plan that knows the forecast must not be
+    slower than one made on the departure wind alone."""
+    polar, p = Polar.synthetic(), SailParams()
+    north = uniform_wind_field(wx=0.0, wy=-6.0)
+    south = uniform_wind_field(wx=0.0, wy=6.0)
+    seq = WindSequence([0.0, 12.0, 60.0], [north, south, south])
+    s, g = np.array([5.0, 1.0]), np.array([5.0, 9.0])
+    td = SailDPTime(seq, polar, p, g, nx=61, ny=61, device="cpu")
+    td.solve()
+    aware = rollout(SailEnv(wind_fn=seq, polar=polar, params=p), td.policy(), s, g)
+    st = SailDP(north, polar, p, g, nx=61, ny=61, device="cpu")
+    st.solve()
+    stale = rollout(SailEnv(wind_fn=seq, polar=polar, params=p), st.policy(), s, g)
+    assert aware["success"]
+    assert (not stale["success"]) or aware["t"] <= stale["t"] + 0.05
+
+
+def test_env_locks_heading_during_a_tack(polar):
+    p = SailParams()
+    wf = uniform_wind_field(**NORTHERLY_12KT)
+    env = SailEnv(wf, polar, p)
+    env.reset(options=dict(start=(5.0, 1.0), goal=(5.0, 9.0), heading=np.deg2rad(45)))
+    env.step(np.array([np.deg2rad(45)]))
+    env.step(np.array([np.deg2rad(135)]))                 # tack starts: penalty exceeds one step
+    assert env.pending > 0
+    env.step(np.array([np.deg2rad(45)]))                  # asking to tack back mid-manoeuvre
+    assert env.tacks == 1 and np.isclose(env.state[2], np.deg2rad(135))
