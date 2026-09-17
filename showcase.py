@@ -45,6 +45,10 @@ def parse_args():
     ap.add_argument("--ny", type=int, default=71)
     ap.add_argument("--nv", type=int, default=13)
     ap.add_argument("--cmap", default="windy", help="'windy' for the Windy-style scale, or any matplotlib cmap")
+    ap.add_argument("--ms-per-unit", type=float, default=2.5,
+                    help="m/s represented by one wind unit in the synthetic scenarios. 2.5 matches the "
+                         "convention used for real forecasts (10 units = 25 m/s), so colours mean the "
+                         "same thing on synthetic and real maps.")
     ap.add_argument("--fps", type=int, default=20)
     ap.add_argument("--device", default=None)
     return ap.parse_args()
@@ -59,12 +63,12 @@ def deviation(traj, start, goal):
     return float(off.max() / L * 100.0), float(L)
 
 
-def paint(ax, wind, cmap="magma", density=1.5, lw_scale=2.2):
+def paint(ax, wind, cmap="magma", density=1.5, lw_scale=2.2, ms_per_unit=2.5):
     """Speed shading + streamlines, weather-map style. Returns the mesh."""
     sp = wind.speed
     if cmap == "windy":   # anchored to m/s so the same colour always means the same wind
         im = ax.pcolormesh(wind.x, wind.y, sp.T, shading="gouraud",
-                           cmap=windy_cmap(), norm=windy_norm(1.0))
+                           cmap=windy_cmap(), norm=windy_norm(ms_per_unit))
     else:
         im = ax.pcolormesh(wind.x, wind.y, sp.T, shading="gouraud", cmap=cmap,
                            vmin=0, vmax=max(10.0, float(sp.max())))
@@ -107,11 +111,11 @@ def solve_case(name, args, params):
 def still(case, args):
     fig, ax = plt.subplots(figsize=(7.6, 7.2), facecolor="#04121f")
     ax.set_facecolor("#04121f")
-    im = paint(ax, case["wind"], cmap=args.cmap)
+    im = paint(ax, case["wind"], cmap=args.cmap, ms_per_unit=args.ms_per_unit)
     cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.03)
-    cb.set_label("wind speed (m/s equivalent)", color="white")
+    cb.set_label("wind speed (m/s)", color="white")
     if args.cmap == "windy":
-        ticks, labels = wind_scale_ticks(1.0)
+        ticks, labels = wind_scale_ticks(args.ms_per_unit)
         cb.set_ticks(ticks); cb.set_ticklabels(labels)
     cb.ax.yaxis.set_tick_params(color="white")
     plt.setp(plt.getp(cb.ax.axes, "yticklabels"), color="white")
@@ -142,7 +146,7 @@ def poster(cases, args):
                              squeeze=False)
     for ax, case in zip(axes.ravel(), cases):
         ax.set_facecolor("#04121f")
-        paint(ax, case["wind"], cmap=args.cmap, density=1.2, lw_scale=1.8)
+        paint(ax, case["wind"], cmap=args.cmap, density=1.2, lw_scale=1.8, ms_per_unit=args.ms_per_unit)
         ax.plot([case["start"][0], case["goal"][0]], [case["start"][1], case["goal"][1]],
                 color="white", lw=1.2, ls=(0, (5, 4)), alpha=0.5, zorder=5)
         draw_track(ax, case["res"]["traj"], lw=2.6)
@@ -171,7 +175,7 @@ def animate(case, args, params, stride=3):
     frames = (n + stride - 1) // stride
     fig, ax = plt.subplots(figsize=(5.6, 5.4), facecolor="#04121f", dpi=100)
     ax.set_facecolor("#04121f")
-    paint(ax, case["wind"], cmap=args.cmap, density=1.1, lw_scale=1.6)
+    paint(ax, case["wind"], cmap=args.cmap, density=1.1, lw_scale=1.6, ms_per_unit=args.ms_per_unit)
     ax.plot([case["start"][0], case["goal"][0]], [case["start"][1], case["goal"][1]],
             color="white", lw=1.2, ls=(0, (5, 4)), alpha=0.5, zorder=5)
     endpoints(ax, case["start"], case["goal"], case["env"].goal_radius)
