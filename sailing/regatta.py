@@ -263,8 +263,16 @@ def animate(boats, wind, title, seed, fps=15, stride=2, tag=""):
     xmin, xmax, ymin, ymax = wind.extent
     fig = plt.figure(figsize=(11.5, 8.0), facecolor=BG)
     ax = fig.add_axes([0.02, 0.04, 0.62, 0.88])
-    board = fig.add_axes([0.66, 0.04, 0.32, 0.88])
+    board = fig.add_axes([0.66, 0.40, 0.32, 0.52])
     board.axis("off")
+    prog = fig.add_axes([0.71, 0.07, 0.26, 0.24])     # race progress: distance still to sail
+    prog.set_facecolor(BG)
+    prog.set_title("distance still to sail (nm)", color="white", fontsize=9.5, pad=4)
+    prog.tick_params(colors="white", labelsize=8)
+    prog.set_xlabel("hours", color="white", fontsize=8.5, labelpad=1)
+    prog.grid(True, color="#1e3a4f", lw=0.6, alpha=0.8)
+    for sp in prog.spines.values():
+        sp.set_color("#2a4a63")
     ax.set_facecolor(BG)
     mesh = ax.pcolormesh(wind.x, wind.y, wind.speed.T, shading="gouraud", cmap=windy_cmap(),
                   norm=windy_norm(p.kts_per_wind_unit * KNOT_MS), zorder=0)
@@ -293,8 +301,11 @@ def animate(boats, wind, title, seed, fps=15, stride=2, tag=""):
                transform=board.transAxes, va="top")
     clock = board.text(0.0, 0.925, "", color="#9ad1ff", fontsize=10.5, family="monospace",
                        transform=board.transAxes, va="top")
-    rows = [board.text(0.0, 0.84 - 0.105 * i, "", fontsize=10.5, family="monospace",
+    rows = [board.text(0.0, 0.80 - 0.135 * i, "", fontsize=10.5, family="monospace",
                        transform=board.transAxes, va="top") for i in range(len(boats))]
+    # remaining distance per boat, precomputed once so the progress chart is cheap to draw
+    remain = np.array([[remaining_nm(b, k) for k in range(len(b["traj"]))] for b in boats], dtype=object)
+    plines = [prog.plot([], [], color=b["color"], lw=1.8)[0] for b in boats]
 
     n = max(len(b["traj"]) for b in boats)
     fin = [b["rounds"][-1][0] for b in boats if b["status"] == "finished"]
@@ -322,6 +333,12 @@ def animate(boats, wind, title, seed, fps=15, stride=2, tag=""):
             quiv.set_UVC(*f(X, Y))
         cwx, cwy = f(5.0, 5.0)
         wfrom = (np.rad2deg(np.arctan2(-float(cwx), -float(cwy))) + 360) % 360
+        for i, b in enumerate(boats):
+            j = min(k, len(b["traj"]) - 1)
+            plines[i].set_data(np.arange(j + 1) * p.dt, remain[i][:j + 1])
+        prog.set_xlim(0, max(1.0, k * p.dt))
+        prog.set_ylim(0, max(float(np.max(r)) for r in remain) * 1.05)
+
         clock.set_text(f"race clock  {t:5.1f} h\nwind mid-course: from {wfrom:03.0f} deg, "
                        f"{np.hypot(float(cwx), float(cwy)) * p.kts_per_wind_unit:4.1f} kt")
 

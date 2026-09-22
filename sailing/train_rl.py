@@ -75,12 +75,16 @@ class DPEvalCallback(BaseCallback):
         env = SailRLEnv(None, map_res=self.args.map_res, n_actions=self.args.n_actions)
         res = evaluate(sb3_policy(self.model), self.args.mode, self.args.eval_n, env=env)
         s = summary(res, self.ref)
-        s.update(steps=self.num_timesteps, wall_min=(time.time() - self.t_start) / 60)
+        ep = list(getattr(self.model, "ep_info_buffer", []) or [])
+        s.update(steps=self.num_timesteps, wall_min=(time.time() - self.t_start) / 60,
+                 train_reward=float(np.mean([e["r"] for e in ep])) if ep else float("nan"),
+                 train_ep_len=float(np.mean([e["l"] for e in ep])) if ep else float("nan"))
         with open(self.log_path, "a") as f:
             f.write(json.dumps(s) + "\n")
         print(f"[{self.num_timesteps:>7}] success {s['success']:.0%} (DP {s['dp_success']:.0%})  "
               f"median gap {s['median_gap_pct']:+.1f}%  tacks {s['tacks']:.1f} (DP {s['dp_tacks']:.1f})  "
-              f"gybes {s['gybes']:.1f} (DP {s['dp_gybes']:.1f})  {s['wall_min']:.0f} min", flush=True)
+              f"gybes {s['gybes']:.1f} (DP {s['dp_gybes']:.1f})  train R {s['train_reward']:+.1f}  "
+              f"{s['wall_min']:.0f} min", flush=True)
         gap = s["median_gap_pct"] if np.isfinite(s["median_gap_pct"]) else 1e9
         key = (s["success"], -gap)
         if key >= self.best:
