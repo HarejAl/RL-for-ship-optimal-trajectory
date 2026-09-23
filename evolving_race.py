@@ -136,6 +136,10 @@ def parse_args():
                     help="repaint the wind map every N frames (the ships still move every frame). "
                          "A background that is identical between frames is what lets the GIF store "
                          "only the changed region, so this is the main lever on file size.")
+    ap.add_argument("--save-runs", action="store_true",
+                    help="also store the raw rollouts in output/race_runs/, so figures can be "
+                         "remade later without re-simulating (see load_runs)")
+    ap.add_argument("--no-render", action="store_true", help="simulate and store only, draw nothing")
     ap.add_argument("--tag", default="")
     return ap.parse_args()
 
@@ -155,6 +159,44 @@ def fuel_curve(actions, p):
     if len(actions) == 0:
         return np.zeros(1)
     return np.concatenate(([0.0], np.cumsum((np.asarray(actions) ** 2).sum(axis=1) * p.dt)))
+
+
+def save_runs(path, runs, prefs, meta):
+    """
+    Store everything a figure could need, so images can be remade without re-simulating.
+
+    One .npz per case holding, per agent, the trajectory, the thrusts, the cumulative fuel
+    curve and the outcome, plus the case configuration (field seed, drift, start, goal,
+    weather window) under `meta` as a JSON string. Rebuild the weather at any time with
+    `drifting_weather(frac, seed=meta['field_seed'], drift=meta['drift'])`.
+    """
+    import json
+    out = {"prefs": np.array(prefs), "meta": np.array(json.dumps(meta))}
+    for n in prefs:
+        r = runs[n]
+        out[f"{n}/traj"] = r["traj"]
+        out[f"{n}/actions"] = r["actions"]
+        out[f"{n}/fuel"] = r["fuel"]
+        out[f"{n}/summary"] = np.array([r["t_model"], r["hours"], r["J"], r["fuel"][-1],
+                                        r["steps"], float(r["success"]), float(r["oob"])])
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    np.savez_compressed(path, **out)
+    return path
+
+
+def load_runs(path):
+    """Inverse of `save_runs`: returns (runs, prefs, meta)."""
+    import json
+    with np.load(path, allow_pickle=False) as f:
+        prefs = [str(p) for p in f["prefs"]]
+        meta = json.loads(str(f["meta"]))
+        runs = {}
+        for n in prefs:
+            s = f[f"{n}/summary"]
+            runs[n] = dict(traj=f[f"{n}/traj"], actions=f[f"{n}/actions"], fuel=f[f"{n}/fuel"],
+                           t_model=float(s[0]), hours=float(s[1]), J=float(s[2]),
+                           steps=int(s[4]), success=bool(s[5]), oob=bool(s[6]))
+    return runs, prefs, meta
 
 
 def shrink_gif(path, colors=128):
@@ -203,6 +245,64 @@ def _dress_map(ax, extent, start, goal, goal_radius):
                 fontsize=9, weight="bold", ha="center", path_effects=TEXT_GLOW, zorder=9)
 
 
+def build_slices(scenario, n_slices, window_h, field_seed=31, drift=(6.0, 3.0)):
+    """The weather window: `n_slices` snapshots labelled with a synthetic clock."""
+    if scenario == "drift":
+        build = lambda f: drifting_weather(f, seed=field_seed, drift=tuple(drift))
+    else:
+        build = BUILDERS[scenario]
+    out = []
+    for i in range(n_slices):
+        frac = i / (n_slices - 1)
+        h = frac * window_h
+        out.append((f"2026-01-01T{int(h):02d}:{int((h % 1) * 60):02d}", build(frac)))
+    return out
+
+
+def load_agents(paths, prefs, field0, goal, par):
+    """policy callables for each preference, sharing one host env per agent."""
+    policies = {}
+    for n in prefs:
+        model, obs_cfg = load_model(paths[n])
+        host = ShipEnv(field0, params=par[n])
+        host.goal = np.asarray(goal, dtype=np.float64)
+        policies[n] = agent_policy(model, obs_cfg, host, wrap_wind_obs(host, obs_cfg))
+    return policies
+
+
+def run_case(policies, start, goal, slices, par, prefs, goal_radius, window_h,
+             refresh_min, max_steps):
+    """
+    Race the agents through one weather window. Returns (runs, evolving, sec_per_tu).
+
+    The window is first probed at a provisional time scale to find how long the SLOWEST ship
+    takes, then stretched so the whole race fits inside it - otherwise the thrifty ship sails
+    off the end of the forecast. Note the probe changes the answer: the agents see different
+    weather under a different time scale, so a case must always be judged on the second pass
+    (and at the same `--slices` the renderer will use).
+    """
+    probe = EvolvingWind(slices, 3600.0)
+    voyage = max(simulate(policies[n], start, goal, probe, par[n], goal_radius,
+                          max_steps)["t_model"] for n in prefs)
+    sec_per_tu = window_h * 3600.0 / max(voyage, 1e-3)
+    evolving = EvolvingWind(slices, sec_per_tu)
+    runs = {}
+    for n in prefs:
+        r = simulate(policies[n], start, goal, evolving, par[n], goal_radius, max_steps,
+                     refresh_min=refresh_min)
+        r["fuel"] = fuel_curve(r["actions"], par[n])
+        runs[n] = r
+    return runs, evolving, sec_per_tu
+
+
+def route_spread(runs):
+    """How far apart the fast and eco routes get, in domain units (mean and max of the
+    one-sided nearest-point distance). The demo is worth watching when this is large."""
+    a, b = runs["fast"]["traj"][:, :2], runs["eco"]["traj"][:, :2]
+    d = np.linalg.norm(a[:, None, :] - b[None, :, :], axis=2).min(axis=1)
+    return float(d.mean()), float(d.max())
+
+
 def main():
     args = parse_args()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -214,15 +314,7 @@ def main():
         n, _, path = spec.partition("=")
         paths[n] = path
 
-    if args.scenario == "drift":
-        build = lambda f: drifting_weather(f, seed=args.field_seed, drift=tuple(args.drift))
-    else:
-        build = BUILDERS[args.scenario]
-    slices = []
-    for i in range(args.slices):
-        frac = i / (args.slices - 1)
-        h = frac * args.window_h
-        slices.append((f"2026-01-01T{int(h):02d}:{int((h % 1) * 60):02d}", build(frac)))
+    slices = build_slices(args.scenario, args.slices, args.window_h, args.field_seed, args.drift)
     field0 = slices[0][1]
     goal_radius = ShipEnv(field0).goal_radius
     span = np.linalg.norm(goal - start)
@@ -231,30 +323,14 @@ def main():
           f"{span:.1f} units apart = {100 * span / width:.0f}% of the map width")
 
     par = {n: P.params(n) for n in prefs}
-    policies = {}
+    policies = load_agents(paths, prefs, field0, goal, par)
     for n in prefs:
-        model, obs_cfg = load_model(paths[n])
-        host = ShipEnv(field0, params=par[n])
-        host.goal = goal.astype(np.float64)
-        policies[n] = agent_policy(model, obs_cfg, host, wrap_wind_obs(host, obs_cfg))
         print(f"  {n:<9s} <- {paths[n]}")
 
-    # Probe once to learn how long the SLOWEST ship takes, then stretch the weather window so
-    # the whole race happens inside it (otherwise the thrifty ship sails past the last slice).
-    probe = EvolvingWind(slices, 3600.0)
-    voyage = max(simulate(policies[n], start, goal, probe, par[n], goal_radius,
-                          args.max_steps)["t_model"] for n in prefs)
-    sec_per_tu = args.window_h * 3600.0 / max(voyage, 1e-3)
-    evolving = EvolvingWind(slices, sec_per_tu)
-    print(f"slowest voyage {voyage:.2f} model time units -> the {args.window_h:g} h window "
-          f"covers the whole race")
-
-    runs = {}
+    runs, evolving, sec_per_tu = run_case(policies, start, goal, slices, par, prefs, goal_radius,
+                                          args.window_h, args.update_every_min, args.max_steps)
     for n in prefs:
-        r = simulate(policies[n], start, goal, evolving, par[n], goal_radius, args.max_steps,
-                     refresh_min=args.update_every_min)
-        r["fuel"] = fuel_curve(r["actions"], par[n])
-        runs[n] = r
+        r = runs[n]
         print(f"  {PLAIN[n]:<11s} {'ARRIVED' if r['success'] else ('LEFT THE MAP' if r['oob'] else 'still out there')}"
               f"  {r['hours']:5.1f} h   fuel {r['fuel'][-1]:7.1f}")
 
@@ -265,8 +341,20 @@ def main():
         print(f"\nheadline: earliest arrival {winner_t:.1f} h, leanest crossing {leanest:.0f} fuel "
               f"({fuel_max / leanest:.1f}x less than the thirstiest)")
 
-    animate(evolving, start, goal, goal_radius, runs, par, prefs, args, fuel_max)
-    panels(evolving, start, goal, goal_radius, runs, par, prefs, args)
+    if args.save_runs:
+        meta = dict(scenario=args.scenario, field_seed=args.field_seed, drift=list(args.drift),
+                    start=list(map(float, start)), goal=list(map(float, goal)),
+                    slices=args.slices, window_h=args.window_h, sec_per_tu=sec_per_tu,
+                    update_every_min=args.update_every_min, goal_radius=goal_radius,
+                    ms_per_unit=args.ms_per_unit, max_steps=args.max_steps,
+                    cost_weights={n: [par[n].time_w, par[n].ctrl_w] for n in prefs})
+        p = save_runs(os.path.join(OUTPUT_DIR, "race_runs",
+                                   f"race_{args.scenario}{args.tag}.npz"), runs, prefs, meta)
+        print(f"runs stored -> {p}")
+
+    if not args.no_render:
+        animate(evolving, start, goal, goal_radius, runs, par, prefs, args, fuel_max)
+        panels(evolving, start, goal, goal_radius, runs, par, prefs, args)
 
 
 def animate(evolving, start, goal, goal_radius, runs, par, prefs, args, fuel_max):

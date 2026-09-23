@@ -28,6 +28,7 @@ loop, amortising the cost of re-solving the routing problem each time the foreca
 | `merge_teacher_npz.py` | Concatenate the shards of parallel `dp_dataset_prefs.py` workers. |
 | `compare_preferences.py` | Roll the preference agents out on shared held-out cases; success, time-energy Pareto, cross-cost matrix, figures. |
 | `evolving_race.py` | Presentation animation: the three preference agents race across a drifting wind map, with plain-language fuel and time readouts. |
+| `race_gallery.py` | Sweep fields x routes for presentable races, store every rollout, score them, render the best and build a contact sheet. |
 | `tests/test_core.py` | Unit and sanity tests (interpolation, dynamics, environment, DP on zero wind and uniform wind). |
 | `legacy/` | The original single-field TD3 code (`env.py`, `main.py`). `trained_model.zip` was trained with this legacy environment and is **not** compatible with the new dynamics. |
 | `WF.pkl` | The original precomputed wind field (speed and direction). |
@@ -261,10 +262,35 @@ simply thrash - measured, all three time out or wander on every set piece tried.
 generated field keeps magnitudes and correlation lengths exactly those of training, so the
 weather moves without leaving the distribution.
 
-Because these clones only arrive on about a third of crossings, the demo case is selected, not
-representative: 40 fields x 3 routes were swept for cases where all three ships arrive, in the
-expected order, by visibly different paths. Say so if anyone asks what a typical crossing looks
-like.
+Because these clones only arrive on about a third of crossings, a presentable race has to be
+found rather than assumed. `race_gallery.py` does the finding:
+
+```bash
+python race_gallery.py --seeds 1 80 --top 8
+```
+
+It races the three agents through every combination of generated field and named route, scores
+each case on what makes the animation worth watching - all three arrive, in the expected order,
+by visibly different paths, across lively weather, with a big fuel ratio - then renders the best
+and lays them out in `output/race_gallery_contact.png` to choose from. The sweep runs at about
+2 s per case on CPU; 400 cases take a quarter of an hour.
+
+Measured over 80 fields x 5 routes: **76 of 400 cases have all three ships arriving and 39 are
+fully ordered**, which is the success rate of the clones showing through. Say so if anyone asks
+what a typical crossing looks like.
+
+EVERY case is stored in `output/race_runs/<name>.npz` - trajectories, thrusts, fuel curves,
+outcomes, and the case configuration - whether it scored well or not, and indexed with its
+metrics in `output/race_gallery.csv`. Figures can therefore be remade without re-simulating:
+
+```python
+from evolving_race import load_runs, drifting_weather
+runs, prefs, meta = load_runs("output/race_runs/s48_ne.npz")
+field = drifting_weather(1.0, seed=meta["field_seed"], drift=tuple(meta["drift"]))
+```
+
+That is how the contact sheet is drawn, and it is the cheap way to try a different visual
+treatment on cases that are already known to work.
 
 Still to run (needs the GPU): the remaining 76 fields of the teacher datasets, and
 `compare_preferences.py` without `--no-dp`, which adds the DP optimum for each objective and
