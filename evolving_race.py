@@ -66,6 +66,12 @@ PLAIN = {
     "balanced": "BALANCED",
     "eco": "FUEL SAVER",
 }
+SUBTITLE = {
+    "fixed": "They were given different instructions. The wind never changes.",
+    "drift": "They were given different instructions - and the wind keeps changing.",
+    "real":  "Real Open-Meteo forecast, {region}, {when} - they were given different instructions.",
+}
+
 PLAIN_SUB = {
     "fast": "get there first, fuel is cheap",
     "balanced": "a sensible compromise",
@@ -100,6 +106,26 @@ THEMES = {
 }
 
 
+def display_field(field, res=121, coarse_below=60):
+    """
+    An Open-Meteo field arrives on a 20x20 grid, which banded flat shading turns into huge
+    blocks. Resample it onto a finer display grid with the field's own bilinear interpolation
+    - the same interpolation the agents see, so this changes the picture and not the physics.
+
+    Every drawing path must go through this, not only the first frame: the animation updates
+    the mesh and the arrows in place, so a raw field handed to `set_array` after a resampled
+    one was used to build the mesh is a silent shape mismatch (it surfaces later as an empty
+    GIF).
+    """
+    if field.x.size >= coarse_below:
+        return field
+    gx = np.linspace(field.x[0], field.x[-1], res)
+    gy = np.linspace(field.y[0], field.y[-1], res)
+    GX, GY = np.meshgrid(gx, gy, indexing="ij")
+    wx, wy = field(GX, GY)
+    return WindField(gx, gy, wx, wy, meta=field.meta)
+
+
 class _ArrowField:
     """Static arrows behind the same `.step(field)` call the particle flow uses."""
 
@@ -113,6 +139,54 @@ class _ArrowField:
     def step(self, field):
         s = self.step_n
         self.q.set_UVC(field.wx[::s, ::s], field.wy[::s, ::s])
+
+
+# Open-Meteo forecast sequences already fetched into output/cache by staleness_study.py /
+# receding_horizon_demo.py. Missing ones are fetched on demand (no API key needed).
+REAL_REGIONS = {
+    "n_atlantic":    dict(file="wind_n_atlantic_20x20_h64_ref25.npz",
+                          lat=(48.0, 56.0), lon=(-25.0, -12.0), hours=64),
+    "mid_atlantic":  dict(file="wind_mid_atlantic_20x20_h64_ref25.npz",
+                          lat=(38.0, 46.0), lon=(-35.0, -22.0), hours=64),
+    "bay_of_biscay": dict(file="wind_bay_of_biscay_20x20_h64_ref25.npz",
+                          lat=(43.5, 48.5), lon=(-11.0, -3.0), hours=64),
+}
+
+
+def real_slices(region, n_slices=None, nx=20, ny=20, ref_speed=25.0):
+    """
+    Hourly Open-Meteo 10 m wind for one sea area, as (timestamp, WindField) pairs.
+
+    Read from output/cache when it is there, fetched once and cached otherwise. The fields
+    arrive normalised by `WindField.from_openmeteo_sequence`, so a policy trained in model
+    units works on them unchanged, and `meta` carries km/unit and (m/s)/unit to get back to
+    physical units - which is what lets the real run keep the forecast's own clock instead of
+    a made-up one.
+    """
+    spec = REAL_REGIONS[region]
+    path = os.path.join(OUTPUT_DIR, "cache", spec["file"])
+    if os.path.exists(path):
+        with np.load(path, allow_pickle=True) as f:
+            x, y, WX, WY = f["x"], f["y"], f["wx"], f["wy"]
+            times = [str(t) for t in f["times"]]
+            meta = dict(f["meta"].item())
+        slices = [(times[i], WindField(x, y, WX[i], WY[i], meta=meta)) for i in range(len(times))]
+    else:
+        print(f"  fetching Open-Meteo {region} (no API key) ...", flush=True)
+        slices = WindField.from_openmeteo_sequence(
+            spec["lat"], spec["lon"], nx=nx, ny=ny, hours=list(range(spec["hours"])),
+            ref_speed=ref_speed)
+        f0 = slices[0][1]
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        np.savez_compressed(path, x=f0.x, y=f0.y,
+                            wx=np.stack([f.wx for _, f in slices]),
+                            wy=np.stack([f.wy for _, f in slices]),
+                            times=np.array([t for t, _ in slices], dtype=object),
+                            meta=np.array(f0.meta, dtype=object))
+    if n_slices and n_slices < len(slices):
+        keep = np.linspace(0, len(slices) - 1, n_slices).round().astype(int)
+        slices = [slices[i] for i in keep]
+    return slices
 
 
 _BIG_FIELD = {}
@@ -149,11 +223,16 @@ def parse_args():
     ap.add_argument("--prefs", nargs="+", default=P.ORDER, choices=list(P.PREFERENCES))
     ap.add_argument("--tag-prefix", default="pref", help="agent <p> is models/<tag-prefix>_<p>.zip")
     ap.add_argument("--models", nargs="*", default=None, metavar="PREF=PATH")
-    ap.add_argument("--scenario", default="drift", choices=["drift"] + sorted(BUILDERS),
-                    help="'drift': a generated field sliding across the domain (in the agents' "
-                         "training distribution, the one to demo with). The others are the "
-                         "synthetic set pieces of evolving_scenario_demo.py - far stronger than "
-                         "anything the generator makes, so the clones thrash in them.")
+    ap.add_argument("--scenario", default="drift",
+                    choices=["drift", "fixed", "real"] + sorted(BUILDERS),
+                    help="'fixed': one generated field, unchanging. 'drift': a generated field "
+                         "sliding across the domain. 'real': an Open-Meteo forecast sequence "
+                         "(--region), on the forecast's own clock. All three are in the agents' "
+                         "training distribution. The rest are the synthetic set pieces of "
+                         "evolving_scenario_demo.py - far stronger than anything the generator "
+                         "makes, so the clones thrash in them.")
+    ap.add_argument("--region", default="n_atlantic", choices=list(REAL_REGIONS),
+                    help="'real': which sea area to pull the forecast for")
     ap.add_argument("--field-seed", type=int, default=31, help="'drift': which generated field")
     ap.add_argument("--drift", type=float, nargs=2, default=[6.0, 3.0],
                     help="'drift': how far the weather slides over the voyage")
@@ -164,6 +243,9 @@ def parse_args():
     ap.add_argument("--update-every-min", type=float, default=90.0,
                     help="how often each agent is handed a refreshed map")
     ap.add_argument("--ms-per-unit", type=float, default=2.5)
+    ap.add_argument("--wind-max-ms", type=float, default=None,
+                    help="top of the wind colour scale in m/s; default is the peak of "
+                         "the window being drawn, so weak real forecasts still show relief")
     ap.add_argument("--max-steps", type=int, default=700)
     ap.add_argument("--fps", type=int, default=20)
     ap.add_argument("--stride", type=int, default=2)
@@ -269,7 +351,7 @@ def shrink_gif(path, colors=128):
     return os.path.getsize(path)
 
 
-def _paint(ax, field, ms_per_unit, step=5, animated=True, theme=None):
+def _paint(ax, field, ms_per_unit, step=5, animated=True, theme=None, max_ms=None):
     """
     The wind map. `levels` bands the speed into that many flat steps instead of a smooth
     ramp - simpler to read at a glance, and it keeps the GIF honest: a smooth light gradient
@@ -278,8 +360,9 @@ def _paint(ax, field, ms_per_unit, step=5, animated=True, theme=None):
     out the same teal at 64 colours).
     """
     th = theme or THEMES["rich"]
+    field = display_field(field)
     cmap = th["cmap"]()
-    norm = windy_norm(ms_per_unit)
+    norm = windy_norm(ms_per_unit) if max_ms is None else windy_norm(ms_per_unit, max_ms)
     if th.get("levels"):
         from matplotlib.colors import BoundaryNorm
         norm = BoundaryNorm(np.linspace(norm.vmin, norm.vmax, th["levels"] + 1), cmap.N)
@@ -311,9 +394,20 @@ def _dress_map(ax, extent, start, goal, goal_radius, theme=None):
                     path_effects=TEXT_GLOW, zorder=9)
 
 
-def build_slices(scenario, n_slices, window_h, field_seed=31, drift=(6.0, 3.0)):
-    """The weather window: `n_slices` snapshots labelled with a synthetic clock."""
-    if scenario == "drift":
+def build_slices(scenario, n_slices, window_h, field_seed=31, drift=(6.0, 3.0), region=None):
+    """
+    The weather window: `n_slices` snapshots labelled with a clock.
+
+    'fixed' repeats one generated field, so the map never changes;
+    'drift'  slides a generated field across the domain;
+    'real'   is an Open-Meteo forecast sequence, which brings its own timestamps;
+    anything else is one of the synthetic set pieces of evolving_scenario_demo.py.
+    """
+    if scenario == "real":
+        return real_slices(region or "n_atlantic", n_slices)
+    if scenario == "fixed":
+        build = lambda f: drifting_weather(0.0, seed=field_seed, drift=(0.0, 0.0))
+    elif scenario == "drift":
         build = lambda f: drifting_weather(f, seed=field_seed, drift=tuple(drift))
     else:
         build = BUILDERS[scenario]
@@ -337,20 +431,24 @@ def load_agents(paths, prefs, field0, goal, par):
 
 
 def run_case(policies, start, goal, slices, par, prefs, goal_radius, window_h,
-             refresh_min, max_steps):
+             refresh_min, max_steps, sec_per_tu=None):
     """
     Race the agents through one weather window. Returns (runs, evolving, sec_per_tu).
 
-    The window is first probed at a provisional time scale to find how long the SLOWEST agent
-    takes, then stretched so the whole race fits inside it - otherwise the thrifty agent sails
-    off the end of the forecast. Note the probe changes the answer: the agents see different
-    weather under a different time scale, so a case must always be judged on the second pass
-    (and at the same `--slices` the renderer will use).
+    With no `sec_per_tu` the window is first probed at a provisional time scale to find how
+    long the SLOWEST agent takes, then stretched so the whole race fits inside it - otherwise
+    the thrifty agent sails off the end of the forecast. Note the probe changes the answer: the
+    agents see different weather under a different time scale, so a case must always be judged
+    on the second pass (and at the same `--slices` the renderer will use).
+
+    Real forecasts pass an explicit `sec_per_tu` instead, taken from the field metadata, so the
+    weather advances at the rate the forecast actually says it does.
     """
-    probe = EvolvingWind(slices, 3600.0)
-    voyage = max(simulate(policies[n], start, goal, probe, par[n], goal_radius,
-                          max_steps)["t_model"] for n in prefs)
-    sec_per_tu = window_h * 3600.0 / max(voyage, 1e-3)
+    if sec_per_tu is None:
+        probe = EvolvingWind(slices, 3600.0)
+        voyage = max(simulate(policies[n], start, goal, probe, par[n], goal_radius,
+                              max_steps)["t_model"] for n in prefs)
+        sec_per_tu = window_h * 3600.0 / max(voyage, 1e-3)
     evolving = EvolvingWind(slices, sec_per_tu)
     runs = {}
     for n in prefs:
@@ -380,7 +478,8 @@ def main():
         n, _, path = spec.partition("=")
         paths[n] = path
 
-    slices = build_slices(args.scenario, args.slices, args.window_h, args.field_seed, args.drift)
+    slices = build_slices(args.scenario, args.slices, args.window_h, args.field_seed,
+                          args.drift, args.region)
     field0 = slices[0][1]
     goal_radius = ShipEnv(field0).goal_radius
     span = np.linalg.norm(goal - start)
@@ -388,13 +487,32 @@ def main():
     print(f"scenario {args.scenario}: start {start} -> destination {goal}, "
           f"{span:.1f} units apart = {100 * span / width:.0f}% of the map width")
 
+    # Shade against the strongest wind in THIS window, not the 0-25 m/s Windy scale: a real
+    # Open-Meteo window peaking near 9 m/s lands entirely in the first band and renders blank.
+    # Generated fields peak at the scale's top anyway, so this changes nothing for them.
+    if args.wind_max_ms is None:
+        peak = max(float(f.speed.max()) for _, f in slices) * args.ms_per_unit
+        args.wind_max_ms = max(5.0, float(np.ceil(peak / 2.5) * 2.5))
+        print(f"  wind shading scaled to {args.wind_max_ms:g} m/s (window peak {peak:.1f} m/s)")
+
     par = {n: P.params(n) for n in prefs}
     policies = load_agents(paths, prefs, field0, goal, par)
     for n in prefs:
         print(f"  {n:<9s} <- {paths[n]}")
 
+    # A real forecast keeps its own clock: one model time unit is the time the ship needs to
+    # cross one model length unit at the field's own scaling, so the weather advances exactly
+    # as fast as the forecast says. Synthetic windows are stretched to fit the voyage instead.
+    fixed_scale = None
+    if args.scenario == "real":
+        m = field0.meta
+        fixed_scale = m["km_per_unit"] * 1000.0 / m["ms_per_unit"]
+        print(f"  {args.region}: {m['km_per_unit']:.0f} km/unit, {m['ms_per_unit']:.1f} (m/s)/unit "
+              f"-> 1 model time unit = {fixed_scale / 3600:.1f} real hours; "
+              f"forecast covers {len(slices)} slices from {slices[0][0]}Z")
     runs, evolving, sec_per_tu = run_case(policies, start, goal, slices, par, prefs, goal_radius,
-                                          args.window_h, args.update_every_min, args.max_steps)
+                                          args.window_h, args.update_every_min, args.max_steps,
+                                          sec_per_tu=fixed_scale)
     for n in prefs:
         r = runs[n]
         print(f"  {PLAIN[n]:<11s} {'ARRIVED' if r['success'] else ('LEFT THE MAP' if r['oob'] else 'still out there')}"
@@ -446,7 +564,8 @@ def animate(evolving, start, goal, goal_radius, runs, par, prefs, args, fuel_max
     side.set_facecolor(th["bg"])
     side.set_axis_off()
 
-    im, q = _paint(ax, evolving.at(0.0), args.ms_per_unit, theme=th)
+    im, q = _paint(ax, evolving.at(0.0), args.ms_per_unit, theme=th,
+                   max_ms=getattr(args, 'wind_max_ms', None))
     _dress_map(ax, evolving.fields[0].extent, start, goal, goal_radius, theme=th)
     if th["colorbar"]:
         cb = fig.colorbar(im, cax=fig.add_subplot(gs[1, 0]), orientation="horizontal")
@@ -468,10 +587,12 @@ def animate(evolving, start, goal, goal_radius, runs, par, prefs, args, fuel_max
         # panel carries the arrival time in words.
         (dots[n],) = ax.plot([], [], "o", color=track[n], mec=th["bg"], mew=1.6, ms=14, zorder=9)
 
-    fig.text(0.015, 0.965, "Three agents. Same sea. Same destination.", color=th["fg"],
-             fontsize=19, weight="bold", va="top")
-    fig.text(0.015, 0.915, "They were given different instructions - and the wind keeps changing.",
-             color=th["muted"], fontsize=12.5, va="top")
+    headline = ("One agent. A sea that will not hold still." if len(prefs) == 1
+                else "Three agents. Same sea. Same destination.")
+    fig.text(0.015, 0.965, headline, color=th["fg"], fontsize=19, weight="bold", va="top")
+    fig.text(0.015, 0.915, SUBTITLE.get(args.scenario, SUBTITLE["drift"]).format(
+        region=args.region.replace("_", " "), when=str(evolving.times[0])[:10]),
+        color=th["muted"], fontsize=12.5, va="top")
     clock = fig.text(0.985, 0.965, "", color=th["fg"], fontsize=17, weight="bold",
                      family="monospace", ha="right", va="top")
 
@@ -494,14 +615,17 @@ def animate(evolving, start, goal, goal_radius, runs, par, prefs, args, fuel_max
         label = side.text(0.0, bar_y - 0.02, "", color=th["fg"], fontsize=11.5,
                           family="monospace", transform=side.transAxes, va="top")
         rows[n] = (bar, label)
-    side.text(0.0, 0.015, "bars: fuel burned, as a share of the thirstiest agent",
+    side.text(0.0, 0.015,
+              "bar: fuel burned so far, against this agent's own total"
+              if len(prefs) == 1 else "bars: fuel burned, as a share of the thirstiest agent",
               color=th["muted"], fontsize=9.5, transform=side.transAxes, va="bottom")
 
     def update(k):
         i = min(k * args.stride, n_steps - 1)
         t_model = i * par[prefs[0]].dt
         if k % max(args.map_every, 1) == 0:
-            field = evolving.at((k - k % max(args.map_every, 1)) * args.stride * par[prefs[0]].dt)
+            field = display_field(
+                evolving.at((k - k % max(args.map_every, 1)) * args.stride * par[prefs[0]].dt))
             im.set_array(field.speed.T.ravel())
             q.step(field)
         for n in prefs:
@@ -544,7 +668,8 @@ def panels(evolving, start, goal, goal_radius, runs, par, prefs, args):
     dt = par[prefs[0]].dt
     fig, axes = plt.subplots(1, 4, figsize=(21, 5.9), facecolor=th["bg"])
     for ax, i in zip(axes, picks):
-        _paint(ax, evolving.at(i * dt), args.ms_per_unit, step=6, animated=False, theme=th)
+        _paint(ax, evolving.at(i * dt), args.ms_per_unit, step=6, animated=False, theme=th,
+               max_ms=getattr(args, 'wind_max_ms', None))
         _dress_map(ax, evolving.fields[0].extent, start, goal, goal_radius, theme=th)
         for n in prefs:
             r = runs[n]
@@ -558,7 +683,8 @@ def panels(evolving, start, goal, goal_radius, runs, par, prefs, args):
     leg = fig.legend(handles=handles, loc="lower center", ncol=len(prefs), frameon=False, fontsize=13)
     for t in leg.get_texts():
         t.set_color(th["fg"])
-    fig.suptitle("Three agents, same sea, same destination - different instructions",
+    fig.suptitle("One agent reading a changing forecast" if len(prefs) == 1 else
+                 "Three agents, same sea, same destination - different instructions",
                  color=th["fg"], fontsize=19, weight="bold")
     fig.tight_layout(rect=(0, 0.06, 1, 0.93))
     out = os.path.join(OUTPUT_DIR, f"race_{args.scenario}{args.tag}_panels.png")

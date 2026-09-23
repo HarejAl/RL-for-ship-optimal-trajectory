@@ -255,6 +255,35 @@ half, and the fuel saver dives south, picks up a favourable flank and arrives at
 quarter. The routes are visibly different, which is the point - it is not three speeds along
 one line.
 
+Four kinds of map, one script:
+
+```bash
+python evolving_race.py --scenario fixed --field-seed 31 --start 0.8 1.4 --goal 9.0 8.4
+python evolving_race.py --scenario drift --field-seed 31 --prefs balanced          # one agent
+python evolving_race.py --scenario drift --field-seed 31                           # all three
+python evolving_race.py --scenario real  --region bay_of_biscay --start 9.0 8.4 --goal 0.8 1.4
+```
+
+| output | map | agents | result |
+| --- | --- | --- | --- |
+| `race_fixed` | one generated field, unchanging | three | 10.7 h / 14.3 h / 24.0 h, fuel 100 / 54 / 22% |
+| `race_drift_solo` | the same field, drifting | one | the map moves under a single route |
+| `race_drift` | the same field, drifting | three | 11.6 h / 15.7 h / 24.3 h, fuel 100 / 49 / 24% |
+| `race_real` | Open-Meteo, Bay of Biscay | three | 17.9 h / 32.3 h / 40.9 h, fuel 100 / 37 / **10%** |
+
+`fixed` and `drift` deliberately share field 31 and the same corner-to-corner route, so putting
+the two side by side shows exactly what the weather changing does to the same problem.
+
+`real` pulls hourly Open-Meteo 10 m wind (no API key, cached under `output/cache`) and runs it on
+**the forecast's own clock**: the field metadata gives 62 km per model length unit and 2.5 (m/s)
+per model speed unit, so one model time unit is 6.9 real hours and the weather advances exactly
+as fast as the forecast says. The 500 km crossing takes the hurried agent 17.9 h and the thrifty
+one 40.9 h on a tenth of the fuel. Two caveats: real forecast fields are much weaker than the
+generated training fields (this window peaks at 12.9 m/s against the generator's 25), so the
+colour scale is auto-fitted to each window or the map renders blank; and on most real routes the
+`fast` agent simply times out - of 15 region-route combinations only three had all three agents
+arriving.
+
 Two looks are available. `--style simple` (the default) is the one to present with: the wind is
 banded into six flat shades of one hue, the arrows are thin and grey, there is no colour bar and
 no lettering on the map, so the three coloured tracks are the only thing competing for
