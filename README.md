@@ -239,20 +239,32 @@ evaluated and scored on identical data budgets and identical cases.
 ### Showing it to a non-technical audience
 
 `evolving_race.py` races the three agents across a wind map that drifts while they sail, with
-the jargon stripped out: the ships are labelled IN A HURRY / BALANCED / FUEL SAVER, the
-readouts are hours at sea and a fuel bar scaled to the thirstiest ship, and the wind scale runs
-"calm on the left, storm on the right".
+the jargon stripped out: the agents are labelled IN A HURRY / BALANCED / FUEL SAVER, the
+readouts are hours at sea and a fuel bar scaled to the thirstiest agent, and the wind scale runs
+the wind banded into six
+plain shades of grey-blue.
 
 ```bash
 python evolving_race.py
 ```
 
 On the default case (generated field 31 drifting 6 units east and 3 north, corner to corner,
-10.8 of the 12 map units apart) the three ships tell the story without a caption: the hurried
-ship arrives in 11.6 h having burned all of its fuel budget, the balanced one 4 h later on
+10.8 of the 12 map units apart) the three agents tell the story without a caption: the hurried
+one arrives in 11.6 h having burned all of its fuel budget, the balanced one 4 h later on
 half, and the fuel saver dives south, picks up a favourable flank and arrives at 24.3 h on a
 quarter. The routes are visibly different, which is the point - it is not three speeds along
 one line.
+
+Two looks are available. `--style simple` (the default) is the one to present with: the wind is
+banded into six flat shades of one hue, the arrows are thin and grey, there is no colour bar and
+no lettering on the map, so the three coloured tracks are the only thing competing for
+attention. `--style rich` is the windy.com-style dark map with the animated particle flow -
+better on a screen you control, busier than it needs to be on a projector.
+
+Banding the wind is not only a visual choice: a smooth light gradient dithers into hundreds of
+near-identical greys, which took the GIF from 2 MB to 14 MB, and requantising that to a small
+palette made the blue and the green agent come out the same teal. Six flat bands fixed all of
+it - the default animation is **1.5 MB**.
 
 The weather is a generated field sliding across the domain rather than one of the synthetic set
 pieces in `evolving_scenario_demo.py`. Those are deliberately stronger than anything the wind
@@ -275,7 +287,7 @@ by visibly different paths, across lively weather, with a big fuel ratio - then 
 and lays them out in `output/race_gallery_contact.png` to choose from. The sweep runs at about
 2 s per case on CPU; 400 cases take a quarter of an hour.
 
-Measured over 80 fields x 5 routes: **76 of 400 cases have all three ships arriving and 39 are
+Measured over 80 fields x 5 routes: **76 of 400 cases have all three agents arriving and 39 are
 fully ordered**, which is the success rate of the clones showing through. Say so if anyone asks
 what a typical crossing looks like.
 

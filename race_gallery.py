@@ -6,8 +6,8 @@ rather than assumed. This sweeps generated fields x routes, races all three agen
 each, stores the raw rollouts, and scores the cases on what makes the animation worth
 watching:
 
-    all three arrive           - a ship that wanders for 500 steps is not a demo
-    in the expected order      - the hurried ship earliest, the thrifty one leanest
+    all three arrive           - an agent that wanders for 500 steps is not a demo
+    in the expected order      - the hurried agent earliest, the thrifty one leanest
     by different paths         - if the three routes overlap it is a speed gap, not a choice
     across lively weather      - a flat blue map says nothing
     with a big fuel ratio      - that is the punchline
@@ -110,36 +110,37 @@ def contact_sheet(names, out_path, ncol=4):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    th = R.THEMES["simple"]
     n = len(names)
     ncol = min(ncol, n)
     nrow = int(np.ceil(n / ncol))
     fig, axes = plt.subplots(nrow, ncol, figsize=(4.3 * ncol, 4.6 * nrow),
-                             facecolor=R.INK, squeeze=False)
+                             facecolor=th["bg"], squeeze=False)
     for ax in axes.ravel():
         ax.set_axis_off()
     for ax, name in zip(axes.ravel(), names):
         runs, prefs, meta = R.load_runs(os.path.join(RUNS_DIR, f"{name}.npz"))
         field = R.drifting_weather(1.0, seed=meta["field_seed"], drift=tuple(meta["drift"]))
         ax.set_axis_on()
-        R._paint(ax, field, meta.get("ms_per_unit", 2.5), step=8)
+        R._paint(ax, field, meta.get("ms_per_unit", 2.5), step=8, animated=False, theme=th)
         R._dress_map(ax, field.extent, np.array(meta["start"]), np.array(meta["goal"]),
-                     meta["goal_radius"])
+                     meta["goal_radius"], theme=th)
         for p in prefs:
             t = runs[p]["traj"]
-            ax.plot(t[:, 0], t[:, 1], color=R.NEON[p], lw=2.4, path_effects=R.GLOW,
+            ax.plot(t[:, 0], t[:, 1], color=th["track"][p], lw=2.4, path_effects=th["glow"],
                     solid_capstyle="round")
         fuel = {p: runs[p]["fuel"][-1] for p in prefs}
         txt = "\n".join(f"{p[:4]:<4s} {runs[p]['hours']:5.1f} h {100 * fuel[p] / max(fuel.values()):3.0f}%"
                         for p in prefs)
         ax.text(0.03, 0.03, txt, transform=ax.transAxes, fontsize=7.5, va="bottom",
-                family="monospace", color="white",
-                bbox=dict(fc=R.INK, ec="#2a4a63", alpha=0.8, pad=2.5), zorder=10)
+                family="monospace", color=th["fg"],
+                bbox=dict(fc=th["bg"], ec=th["frame"], alpha=0.85, pad=2.5), zorder=10)
         ax.set_title(f"{name}   fuel x{max(fuel.values()) / max(min(fuel.values()), 1e-9):.1f}",
-                     color="white", fontsize=11, pad=6)
+                     color=th["fg"], fontsize=11, pad=6)
     fig.suptitle("Candidate races - pick one and re-render it with evolving_race.py",
-                 color="white", fontsize=15, weight="bold")
+                 color=th["fg"], fontsize=15, weight="bold")
     fig.tight_layout(rect=(0, 0, 1, 0.965))
-    fig.savefig(out_path, dpi=110, facecolor=R.INK)
+    fig.savefig(out_path, dpi=110, facecolor=th["bg"])
     plt.close(fig)
     return out_path
 
@@ -203,7 +204,7 @@ def main():
 
     good = [r for r in rows if r["score"] > 0]
     ranked = sorted(good, key=lambda r: -r["score"])
-    print(f"\n{len(good)} of {len(rows)} cases have all three ships arriving; "
+    print(f"\n{len(good)} of {len(rows)} cases have all three agents arriving; "
           f"{sum(1 for r in good if r['time_ordered'] and r['energy_ordered'])} are fully ordered\n")
     for r in ranked[:max(args.top, 10)]:
         print(f"  {r['name']:<10s} score {r['score']:6.2f}  spread {r['spread_mean']:.2f}  "

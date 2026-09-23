@@ -1,14 +1,14 @@
 """
-Three ships, one sea: race the fast / balanced / eco agents across a changing wind map.
+Three agents, one sea: race the fast / balanced / eco agents across a changing wind map.
 
 Built for an audience that has never heard of trajectory optimisation. The three agents are
 identical networks trained on the same wind, differing only in what they were told to value:
 arriving early, or arriving cheaply. They leave the same port at the same moment, sail the
-same weather, and the animation lets you watch the disagreement play out - the impatient ship
+same weather, and the animation lets you watch the disagreement play out - the impatient one
 pulls ahead through the gale, the thrifty one hangs back and lets the wind do the work.
 
 Nothing on screen is jargon: the readouts are hours at sea and fuel burned, the fuel bars are
-scaled to the thirstiest ship so the punchline ("same trip, a quarter of the fuel") is readable
+scaled to the thirstiest agent so the punchline ("same trip, a quarter of the fuel") is readable
 without a caption.
 
     python evolving_race.py                                    # the default demo
@@ -21,7 +21,7 @@ is long enough for the three priorities to separate visibly.
 CHOOSING A CASE. These clones arrive on roughly a third of crossings (see the multi-objective
 section of the README), so a demo case has to be picked, not assumed: `--field-seed` and the
 route were selected by sweeping 40 generated fields x 3 routes and keeping the cases where all
-three ships arrive, in the expected order, by visibly different paths. Seeds 31 (the default,
+three agents arrive, in the expected order, by visibly different paths. Seeds 31 (the default,
 corner to corner) and 26 (due east) both hold up at the renderer's own weather fidelity; a case
 that looks fine at fewer `--slices` can change outcome at 49, so re-check after changing them.
 
@@ -44,7 +44,7 @@ from benchmark_dp import load_model
 from wind_obs import wrap_wind_obs
 from receding_horizon_demo import EvolvingWind, simulate
 from evolving_scenario_demo import BUILDERS
-from viz import windy_cmap, windy_norm, wind_scale_ticks
+from viz import windy_cmap, windy_norm, wind_scale_ticks, WindParticles
 import preferences as P
 
 # Anchor all paths to this script's location
@@ -71,6 +71,48 @@ PLAIN_SUB = {
     "balanced": "a sensible compromise",
     "eco": "burn as little as possible",
 }
+
+
+def _calm_cmap():
+    """White for calm water, slate for a gale. One hue, so it never competes with the tracks."""
+    from matplotlib.colors import LinearSegmentedColormap
+    return LinearSegmentedColormap.from_list(
+        "calm", ["#ffffff", "#e6ecf3", "#c7d5e3", "#a3b7cd", "#7d94b0", "#5b738f"])
+
+
+# Two looks. `simple` is the one to present with: a single-hue wind shade, thin arrows, no
+# colour bar, no captions on the map, three strong tracks and three numbers. `rich` is the
+# windy.com-style dark map with the animated particle flow - better for a screen you control,
+# busier than it needs to be on a projector.
+THEMES = {
+    "simple": dict(bg="white", fg="#16202b", muted="#6b7280", frame="#c3ccd6",
+                   track=dict(P.COLORS), cmap=_calm_cmap, norm_max=1.0,
+                   particles=False, colorbar=False, subtitles=False, map_labels=False,
+                   arrow_color="#7d8ea3", arrow_alpha=0.75, glow=None,
+                   marker="#16202b", bar_bg="#e8ecf1", track_lw=3.4,
+                   levels=6, shading="auto"),
+    "rich": dict(bg=INK, fg="white", muted="#9fc5dd", frame="#2a4a63",
+                 track=dict(NEON), cmap=windy_cmap, norm_max=1.0,
+                 particles=True, colorbar=True, subtitles=True, map_labels=True,
+                 arrow_color="white", arrow_alpha=0.85, glow=GLOW,
+                 marker="white", bar_bg="#12293b", track_lw=3.0,
+                 levels=None, shading="gouraud"),
+}
+
+
+class _ArrowField:
+    """Static arrows behind the same `.step(field)` call the particle flow uses."""
+
+    def __init__(self, ax, field, step, color, alpha):
+        X, Y = np.meshgrid(field.x, field.y, indexing="ij")
+        self.step_n = step
+        self.q = ax.quiver(X[::step, ::step], Y[::step, ::step], field.wx[::step, ::step],
+                           field.wy[::step, ::step], color=color, scale=170, width=0.0026,
+                           alpha=alpha)
+
+    def step(self, field):
+        s = self.step_n
+        self.q.set_UVC(field.wx[::s, ::s], field.wy[::s, ::s])
 
 
 _BIG_FIELD = {}
@@ -128,18 +170,24 @@ def parse_args():
     ap.add_argument("--hold-s", type=float, default=1.6, help="seconds to hold the final frame")
     ap.add_argument("--dpi", type=int, default=76, help="animation resolution; the GIF is a full-frame "
                                                         "animated map, so this drives the file size")
-    ap.add_argument("--gif-colors", type=int, default=0,
-                    help="requantise the finished GIF onto one shared palette. Off by default: it "
-                         "discards the per-frame cropping Pillow already did, and here that costs "
-                         "more than the palette saves.")
+    ap.add_argument("--gif-colors", type=int, default=None,
+                    help="requantise the finished GIF onto one shared palette; 0 disables it. "
+                         "Default depends on the style: worth 64 colours for the banded 'simple' "
+                         "map, where the palette is small anyway, and a loss for 'rich', whose "
+                         "full-spectrum map needs every slot (and where it also discards the "
+                         "per-frame cropping Pillow already did).")
     ap.add_argument("--map-every", type=int, default=4,
-                    help="repaint the wind map every N frames (the ships still move every frame). "
+                    help="repaint the wind map every N frames (the agents still move every frame). "
                          "A background that is identical between frames is what lets the GIF store "
                          "only the changed region, so this is the main lever on file size.")
     ap.add_argument("--save-runs", action="store_true",
                     help="also store the raw rollouts in output/race_runs/, so figures can be "
                          "remade later without re-simulating (see load_runs)")
     ap.add_argument("--no-render", action="store_true", help="simulate and store only, draw nothing")
+    ap.add_argument("--style", choices=["simple", "rich"], default="simple",
+                    help="'simple': one-hue wind shade, thin arrows, no colour bar, no map "
+                         "captions - the one to present with. 'rich': the windy.com-style "
+                         "dark map with the animated particle flow.")
     ap.add_argument("--tag", default="")
     return ap.parse_args()
 
@@ -203,10 +251,11 @@ def shrink_gif(path, colors=128):
     """
     Requantise a finished GIF onto ONE shared palette.
 
-    Every frame here is a full repaint of a photographic wind map, so GIF's inter-frame
-    optimisation has almost nothing to work with and Pillow's per-frame palettes make it
-    worse (each frame carries its own colour table, and the background shimmers as the
-    palettes disagree). One adaptive palette taken from the middle of the voyage fixes both.
+    Worth it only when the map is already banded into few colours (the 'simple' style): the
+    shared palette then costs nothing visually and roughly halves the file. On a full-spectrum
+    map it backfires twice - it discards the per-frame cropping Pillow did, and the background
+    greys crowd out the track colours, which at 64 colours turned the blue and the green agent
+    into the same teal.
     """
     from PIL import Image, ImageSequence
     im = Image.open(path)
@@ -220,29 +269,46 @@ def shrink_gif(path, colors=128):
     return os.path.getsize(path)
 
 
-def _paint(ax, field, ms_per_unit, step=5):
-    im = ax.pcolormesh(field.x, field.y, field.speed.T, shading="gouraud",
-                       cmap=windy_cmap(), norm=windy_norm(ms_per_unit))
-    X, Y = np.meshgrid(field.x, field.y, indexing="ij")
-    q = ax.quiver(X[::step, ::step], Y[::step, ::step], field.wx[::step, ::step],
-                  field.wy[::step, ::step], color="white", scale=170, width=0.0026, alpha=0.8)
-    return im, q
+def _paint(ax, field, ms_per_unit, step=5, animated=True, theme=None):
+    """
+    The wind map. `levels` bands the speed into that many flat steps instead of a smooth
+    ramp - simpler to read at a glance, and it keeps the GIF honest: a smooth light gradient
+    dithers into hundreds of near-identical greys, which both bloats the file and, if you
+    then requantise it, eats the palette slots the tracks need (blue and green agents came
+    out the same teal at 64 colours).
+    """
+    th = theme or THEMES["rich"]
+    cmap = th["cmap"]()
+    norm = windy_norm(ms_per_unit)
+    if th.get("levels"):
+        from matplotlib.colors import BoundaryNorm
+        norm = BoundaryNorm(np.linspace(norm.vmin, norm.vmax, th["levels"] + 1), cmap.N)
+    im = ax.pcolormesh(field.x, field.y, field.speed.T, shading=th.get("shading", "gouraud"),
+                       cmap=cmap, norm=norm)
+    # particles need motion, so a still frame always gets arrows
+    if animated and th["particles"]:
+        return im, WindParticles(ax, field.extent)   # windy.com-style flow, as the sailing demos
+    return im, _ArrowField(ax, field, step, th["arrow_color"], th["arrow_alpha"])
 
 
-def _dress_map(ax, extent, start, goal, goal_radius):
+def _dress_map(ax, extent, start, goal, goal_radius, theme=None):
+    th = theme or THEMES["rich"]
     xmin, xmax, ymin, ymax = extent
-    ax.set(xlim=(xmin, xmax), ylim=(ymin, ymax), facecolor=INK)
+    ax.set(xlim=(xmin, xmax), ylim=(ymin, ymax), facecolor=th["bg"])
     ax.set_xticks([])
     ax.set_yticks([])
     for s in ax.spines.values():
-        s.set_color("#2a4a63")
-    ax.plot(*start, "o", color="white", mec=INK, mew=1.5, ms=11, zorder=8)
-    ax.plot(*goal, "*", color="white", mec=INK, mew=1.2, ms=26, zorder=8)
-    ax.add_patch(plt.Circle(goal, goal_radius, fill=False, ec="white", lw=1.3, ls=":", zorder=7))
-    ax.annotate("START", start, textcoords="offset points", xytext=(12, -14), color="white",
-                fontsize=9, weight="bold", path_effects=TEXT_GLOW, zorder=9)
-    ax.annotate("DESTINATION", goal, textcoords="offset points", xytext=(-18, 16), color="white",
-                fontsize=9, weight="bold", ha="center", path_effects=TEXT_GLOW, zorder=9)
+        s.set_color(th["frame"])
+    mk, edge = th["marker"], th["bg"]
+    ax.plot(*start, "o", color=mk, mec=edge, mew=1.5, ms=11, zorder=8)
+    ax.plot(*goal, "*", color=mk, mec=edge, mew=1.2, ms=26, zorder=8)
+    ax.add_patch(plt.Circle(goal, goal_radius, fill=False, ec=mk, lw=1.3, ls=":", zorder=7))
+    if th["map_labels"]:
+        ax.annotate("START", start, textcoords="offset points", xytext=(12, -14), color=th["fg"],
+                    fontsize=9, weight="bold", path_effects=TEXT_GLOW, zorder=9)
+        ax.annotate("DESTINATION", goal, textcoords="offset points", xytext=(-18, 16),
+                    color=th["fg"], fontsize=9, weight="bold", ha="center",
+                    path_effects=TEXT_GLOW, zorder=9)
 
 
 def build_slices(scenario, n_slices, window_h, field_seed=31, drift=(6.0, 3.0)):
@@ -275,8 +341,8 @@ def run_case(policies, start, goal, slices, par, prefs, goal_radius, window_h,
     """
     Race the agents through one weather window. Returns (runs, evolving, sec_per_tu).
 
-    The window is first probed at a provisional time scale to find how long the SLOWEST ship
-    takes, then stretched so the whole race fits inside it - otherwise the thrifty ship sails
+    The window is first probed at a provisional time scale to find how long the SLOWEST agent
+    takes, then stretched so the whole race fits inside it - otherwise the thrifty agent sails
     off the end of the forecast. Note the probe changes the answer: the agents see different
     weather under a different time scale, so a case must always be judged on the second pass
     (and at the same `--slices` the renderer will use).
@@ -361,63 +427,75 @@ def animate(evolving, start, goal, goal_radius, runs, par, prefs, args, fuel_max
     n_steps = max(len(r["traj"]) for r in runs.values())
     frames = (n_steps + args.stride - 1) // args.stride + int(args.hold_s * args.fps)
 
-    fig = plt.figure(figsize=(13.2, 7.4), facecolor=INK, dpi=args.dpi)
-    # the wind scale is a horizontal strip UNDER the map: as a vertical bar beside it, its tick
-    # labels run straight into the side panel at any column width that leaves the map usable
-    gs = fig.add_gridspec(2, 2, width_ratios=[1.60, 1.02], height_ratios=[1.0, 0.045],
-                          wspace=0.06, hspace=0.07, left=0.015, right=0.985, top=0.86, bottom=0.06)
-    ax = fig.add_subplot(gs[0, 0])
-    cax = fig.add_subplot(gs[1, 0])
-    side = fig.add_subplot(gs[:, 1])
-    side.set_facecolor(INK)
+    th = THEMES[args.style]
+    track, glow = th["track"], th["glow"]
+    fig = plt.figure(figsize=(13.2, 7.4), facecolor=th["bg"], dpi=args.dpi)
+    if th["colorbar"]:
+        # the wind scale is a horizontal strip UNDER the map: as a vertical bar beside it, its
+        # tick labels run into the side panel at any column width that leaves the map usable
+        gs = fig.add_gridspec(2, 2, width_ratios=[1.60, 1.02], height_ratios=[1.0, 0.045],
+                              wspace=0.06, hspace=0.07, left=0.015, right=0.985,
+                              top=0.86, bottom=0.06)
+        ax = fig.add_subplot(gs[0, 0])
+        side = fig.add_subplot(gs[:, 1])
+    else:
+        gs = fig.add_gridspec(1, 2, width_ratios=[1.60, 1.02], wspace=0.06,
+                              left=0.015, right=0.985, top=0.87, bottom=0.04)
+        ax = fig.add_subplot(gs[0, 0])
+        side = fig.add_subplot(gs[0, 1])
+    side.set_facecolor(th["bg"])
     side.set_axis_off()
 
-    im, q = _paint(ax, evolving.at(0.0), args.ms_per_unit)
-    _dress_map(ax, evolving.fields[0].extent, start, goal, goal_radius)
-    cb = fig.colorbar(im, cax=cax, orientation="horizontal")
-    ticks, labels = wind_scale_ticks(args.ms_per_unit)
-    cb.set_ticks(ticks)
-    cb.set_ticklabels(labels)
-    cb.set_label("wind speed (m/s)   -   calm on the left, storm on the right",
-                 color="#9fc5dd", fontsize=9, labelpad=2)
-    cb.ax.xaxis.set_tick_params(color="white", labelsize=8)
-    plt.setp(plt.getp(cb.ax.axes, "xticklabels"), color="white")
-    cb.outline.set_edgecolor("#2a4a63")
+    im, q = _paint(ax, evolving.at(0.0), args.ms_per_unit, theme=th)
+    _dress_map(ax, evolving.fields[0].extent, start, goal, goal_radius, theme=th)
+    if th["colorbar"]:
+        cb = fig.colorbar(im, cax=fig.add_subplot(gs[1, 0]), orientation="horizontal")
+        ticks, labels = wind_scale_ticks(args.ms_per_unit)
+        cb.set_ticks(ticks)
+        cb.set_ticklabels(labels)
+        cb.set_label("wind speed (m/s)   -   calm on the left, storm on the right",
+                     color=th["muted"], fontsize=9, labelpad=2)
+        cb.ax.xaxis.set_tick_params(color=th["fg"], labelsize=8)
+        plt.setp(plt.getp(cb.ax.axes, "xticklabels"), color=th["fg"])
+        cb.outline.set_edgecolor(th["frame"])
 
     lines, dots = {}, {}
     for n in prefs:
-        (lines[n],) = ax.plot([], [], color=NEON[n], lw=3.0, zorder=6, path_effects=GLOW,
-                              solid_capstyle="round")
-        # arrival is marked by giving the dot a white ring, not a label: all three ships end up
-        # inside the same small disc, so three "ARRIVED" labels would pile onto each other and
-        # onto the DESTINATION caption. The side panel carries the arrival time in words.
-        (dots[n],) = ax.plot([], [], "o", color=NEON[n], mec=INK, mew=1.6, ms=14, zorder=9)
+        (lines[n],) = ax.plot([], [], color=track[n], lw=th["track_lw"], zorder=6,
+                              path_effects=glow, solid_capstyle="round")
+        # arrival is marked by ringing the dot, not by a label: all three agents end up inside
+        # the same small disc, so three "ARRIVED" labels would pile onto each other. The side
+        # panel carries the arrival time in words.
+        (dots[n],) = ax.plot([], [], "o", color=track[n], mec=th["bg"], mew=1.6, ms=14, zorder=9)
 
-    fig.text(0.015, 0.955, "Three ships. Same sea. Same destination.", color="white",
+    fig.text(0.015, 0.965, "Three agents. Same sea. Same destination.", color=th["fg"],
              fontsize=19, weight="bold", va="top")
-    fig.text(0.015, 0.905, "They were given different instructions - and the wind keeps changing.",
-             color="#9fc5dd", fontsize=12.5, va="top")
-    clock = fig.text(0.985, 0.955, "", color="white", fontsize=17, weight="bold",
+    fig.text(0.015, 0.915, "They were given different instructions - and the wind keeps changing.",
+             color=th["muted"], fontsize=12.5, va="top")
+    clock = fig.text(0.985, 0.965, "", color=th["fg"], fontsize=17, weight="bold",
                      family="monospace", ha="right", va="top")
 
-    # side panel: one card per ship, with a fuel bar that fills as it sails
+    # side panel: one row per agent, with a fuel bar that fills as it sails
     rows = {}
+    gap = 0.30 if th["subtitles"] else 0.27
     for i, n in enumerate(prefs):
-        y = 0.93 - i * 0.30
-        side.text(0.0, y, PLAIN[n], color=NEON[n], fontsize=15, weight="bold",
+        y = 0.93 - i * gap
+        side.text(0.0, y, PLAIN[n], color=track[n], fontsize=16, weight="bold",
                   transform=side.transAxes, va="top")
-        side.text(0.0, y - 0.055, PLAIN_SUB[n], color="#9fc5dd", fontsize=10.5,
-                  transform=side.transAxes, va="top", style="italic")
-        side.add_patch(plt.Rectangle((0.0, y - 0.155), 0.86, 0.045, transform=side.transAxes,
-                                     fc="#12293b", ec="#2a4a63", lw=0.8, zorder=2))
-        bar = plt.Rectangle((0.0, y - 0.155), 0.0, 0.045, transform=side.transAxes,
-                            fc=NEON[n], ec="none", zorder=3)
+        if th["subtitles"]:
+            side.text(0.0, y - 0.055, PLAIN_SUB[n], color=th["muted"], fontsize=10.5,
+                      transform=side.transAxes, va="top", style="italic")
+        bar_y = y - (0.155 if th["subtitles"] else 0.105)
+        side.add_patch(plt.Rectangle((0.0, bar_y), 0.86, 0.045, transform=side.transAxes,
+                                     fc=th["bar_bg"], ec=th["frame"], lw=0.8, zorder=2))
+        bar = plt.Rectangle((0.0, bar_y), 0.0, 0.045, transform=side.transAxes,
+                            fc=track[n], ec="none", zorder=3)
         side.add_patch(bar)
-        label = side.text(0.0, y - 0.175, "", color="white", fontsize=11,
+        label = side.text(0.0, bar_y - 0.02, "", color=th["fg"], fontsize=11.5,
                           family="monospace", transform=side.transAxes, va="top")
         rows[n] = (bar, label)
-    side.text(0.0, 0.015, "bars: fuel burned, as a share of the thirstiest ship",
-              color="#6f93ab", fontsize=9.5, transform=side.transAxes, va="bottom")
+    side.text(0.0, 0.015, "bars: fuel burned, as a share of the thirstiest agent",
+              color=th["muted"], fontsize=9.5, transform=side.transAxes, va="bottom")
 
     def update(k):
         i = min(k * args.stride, n_steps - 1)
@@ -425,14 +503,14 @@ def animate(evolving, start, goal, goal_radius, runs, par, prefs, args, fuel_max
         if k % max(args.map_every, 1) == 0:
             field = evolving.at((k - k % max(args.map_every, 1)) * args.stride * par[prefs[0]].dt)
             im.set_array(field.speed.T.ravel())
-            q.set_UVC(field.wx[::5, ::5], field.wy[::5, ::5])
+            q.step(field)
         for n in prefs:
             r = runs[n]
             j = min(i, len(r["traj"]) - 1)
             arrived = r["success"] and j >= len(r["traj"]) - 1
             lines[n].set_data(r["traj"][:j + 1, 0], r["traj"][:j + 1, 1])
             dots[n].set_data([r["traj"][j, 0]], [r["traj"][j, 1]])
-            dots[n].set_markeredgecolor("white" if arrived else INK)
+            dots[n].set_markeredgecolor(th["fg"] if arrived else th["bg"])
             dots[n].set_markersize(16 if arrived else 14)
             fuel = r["fuel"][min(j, len(r["fuel"]) - 1)]
             bar, label = rows[n]
@@ -448,9 +526,10 @@ def animate(evolving, start, goal, goal_radius, runs, par, prefs, args, fuel_max
     ani.save(out, writer=PillowWriter(fps=args.fps))
     plt.close(fig)
     mb = os.path.getsize(out) / 1e6
-    if args.gif_colors:
-        mb2 = shrink_gif(out, args.gif_colors) / 1e6
-        print(f"saved {out}  ({mb:.1f} MB -> {mb2:.1f} MB at {args.gif_colors} colours, "
+    colors = args.gif_colors if args.gif_colors is not None else (64 if th.get("levels") else 0)
+    if colors:
+        mb2 = shrink_gif(out, colors) / 1e6
+        print(f"saved {out}  ({mb:.1f} MB -> {mb2:.1f} MB at {colors} colours, "
               f"{frames} frames)")
     else:
         print(f"saved {out}  ({mb:.1f} MB, {frames} frames)")
@@ -458,30 +537,32 @@ def animate(evolving, start, goal, goal_radius, runs, par, prefs, args, fuel_max
 
 def panels(evolving, start, goal, goal_radius, runs, par, prefs, args):
     """Four stills across the voyage, for slides where a GIF will not play."""
+    th = THEMES[args.style]
+    track = th["track"]
     n_steps = max(len(r["traj"]) for r in runs.values())
     picks = [0, n_steps // 3, 2 * n_steps // 3, n_steps - 1]
     dt = par[prefs[0]].dt
-    fig, axes = plt.subplots(1, 4, figsize=(21, 5.9), facecolor=INK)
+    fig, axes = plt.subplots(1, 4, figsize=(21, 5.9), facecolor=th["bg"])
     for ax, i in zip(axes, picks):
-        _paint(ax, evolving.at(i * dt), args.ms_per_unit, step=6)
-        _dress_map(ax, evolving.fields[0].extent, start, goal, goal_radius)
+        _paint(ax, evolving.at(i * dt), args.ms_per_unit, step=6, animated=False, theme=th)
+        _dress_map(ax, evolving.fields[0].extent, start, goal, goal_radius, theme=th)
         for n in prefs:
             r = runs[n]
             j = min(i, len(r["traj"]) - 1)
-            ax.plot(r["traj"][:j + 1, 0], r["traj"][:j + 1, 1], color=NEON[n], lw=2.6,
-                    path_effects=GLOW, solid_capstyle="round")
-            ax.plot(r["traj"][j, 0], r["traj"][j, 1], "o", color=NEON[n], mec=INK, ms=10)
-        ax.set_title(f"+{evolving.real_hours(i * dt):.1f} h", color="white", fontsize=14, pad=8)
-    handles = [plt.Line2D([], [], color=NEON[n], lw=3.2, label=f"{PLAIN[n]} - {PLAIN_SUB[n]}")
-               for n in prefs]
-    leg = fig.legend(handles=handles, loc="lower center", ncol=len(prefs), frameon=False, fontsize=12)
+            ax.plot(r["traj"][:j + 1, 0], r["traj"][:j + 1, 1], color=track[n], lw=2.8,
+                    path_effects=th["glow"], solid_capstyle="round")
+            ax.plot(r["traj"][j, 0], r["traj"][j, 1], "o", color=track[n], mec=th["bg"], ms=10)
+        ax.set_title(f"+{evolving.real_hours(i * dt):.1f} h", color=th["fg"], fontsize=14, pad=8)
+    label = (lambda n: f"{PLAIN[n]} - {PLAIN_SUB[n]}") if th["subtitles"] else (lambda n: PLAIN[n])
+    handles = [plt.Line2D([], [], color=track[n], lw=3.2, label=label(n)) for n in prefs]
+    leg = fig.legend(handles=handles, loc="lower center", ncol=len(prefs), frameon=False, fontsize=13)
     for t in leg.get_texts():
-        t.set_color("white")
-    fig.suptitle("Three ships, same sea, same destination - different instructions",
-                 color="white", fontsize=19, weight="bold")
+        t.set_color(th["fg"])
+    fig.suptitle("Three agents, same sea, same destination - different instructions",
+                 color=th["fg"], fontsize=19, weight="bold")
     fig.tight_layout(rect=(0, 0.06, 1, 0.93))
     out = os.path.join(OUTPUT_DIR, f"race_{args.scenario}{args.tag}_panels.png")
-    fig.savefig(out, dpi=115, facecolor=INK)
+    fig.savefig(out, dpi=115, facecolor=th["bg"])
     plt.close(fig)
     print(f"saved {out}")
 
