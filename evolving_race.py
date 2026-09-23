@@ -56,9 +56,12 @@ INK = "#04121f"
 GLOW = [pe.withStroke(linewidth=4.5, foreground=INK, alpha=0.9)]
 TEXT_GLOW = [pe.withStroke(linewidth=3.0, foreground=INK, alpha=0.95)]
 
-# Bright track colours, chosen to sit outside the blue-teal-green middle of the wind palette.
-# (preferences.COLORS is the print palette; on a dark animated map it disappears.)
-NEON = {"fast": "#ff5714", "balanced": "#ffe74c", "eco": "#35f0c0"}
+# Track colours, coherent with the sailing demos: the same dark ground (#04121f), the same
+# windy.com speed palette behind them, and the same bright cyan for the reference agent
+# (sailing/animate_tacking.py uses AGENT = "#00e5ff"). All three sit outside the blue-teal-green
+# middle of the wind palette so they never disappear into the map.
+NEON = {"fast": "#ff4d6d", "balanced": "#00e5ff", "eco": "#ffe74c"}
+SOLO = "#00e5ff"        # a lone agent uses the sailing agent colour exactly
 
 # what each agent is called in front of an audience
 PLAIN = {
@@ -71,7 +74,11 @@ SUBTITLE = {
     "drift": "They were given different instructions - and the wind keeps changing.",
     "real":  "Real Open-Meteo forecast, {region}, {when} - they were given different instructions.",
 }
-
+SOLO_SUBTITLE = {
+    "fixed": "One wind map, held still. The agent reads it and commits to a route.",
+    "drift": "The map is re-read every 90 minutes, and it is not the map it was at departure.",
+    "real":  "Real Open-Meteo forecast, {region}, {when}, re-read as the agent sails.",
+}
 PLAIN_SUB = {
     "fast": "get there first, fuel is cheap",
     "balanced": "a sensible compromise",
@@ -86,24 +93,41 @@ def _calm_cmap():
         "calm", ["#ffffff", "#e6ecf3", "#c7d5e3", "#a3b7cd", "#7d94b0", "#5b738f"])
 
 
-# Two looks. `simple` is the one to present with: a single-hue wind shade, thin arrows, no
-# colour bar, no captions on the map, three strong tracks and three numbers. `rich` is the
-# windy.com-style dark map with the animated particle flow - better for a screen you control,
-# busier than it needs to be on a projector.
+# Two looks. `sailing` (the default) is the house style of this repo: the windy.com speed
+# palette on a dark ground with a drifting particle flow, exactly as the sailing demos draw it,
+# so a talk can cut between the two without the audience re-learning the picture. Clutter is
+# still off - no lettering on the map, no agent subtitles - the colour is the wind, nothing more.
+# `simple` is the ink-saving alternative: one hue banded into six flat steps, on white.
 THEMES = {
+    "sailing": dict(bg=INK, fg="white", muted="#9fc5dd", frame="#2a4a63",
+                    track=dict(NEON), cmap=windy_cmap, norm_max=1.0,
+                    particles=True, colorbar=True, subtitles=False, map_labels=False,
+                    arrow_color="white", arrow_alpha=0.55, glow=GLOW,
+                    marker="white", bar_bg="#12293b", track_lw=3.0,
+                    levels=None, shading="gouraud"),
     "simple": dict(bg="white", fg="#16202b", muted="#6b7280", frame="#c3ccd6",
                    track=dict(P.COLORS), cmap=_calm_cmap, norm_max=1.0,
                    particles=False, colorbar=False, subtitles=False, map_labels=False,
                    arrow_color="#7d8ea3", arrow_alpha=0.75, glow=None,
                    marker="#16202b", bar_bg="#e8ecf1", track_lw=3.4,
                    levels=6, shading="auto"),
-    "rich": dict(bg=INK, fg="white", muted="#9fc5dd", frame="#2a4a63",
-                 track=dict(NEON), cmap=windy_cmap, norm_max=1.0,
-                 particles=True, colorbar=True, subtitles=True, map_labels=True,
-                 arrow_color="white", arrow_alpha=0.85, glow=GLOW,
-                 marker="white", bar_bg="#12293b", track_lw=3.0,
-                 levels=None, shading="gouraud"),
 }
+THEMES["rich"] = THEMES["sailing"]      # the old name
+
+
+class _ArrowField:
+    """Static arrows behind the same `.step(field)` call the particle flow uses."""
+
+    def __init__(self, ax, field, step, color, alpha):
+        X, Y = np.meshgrid(field.x, field.y, indexing="ij")
+        self.step_n = step
+        self.q = ax.quiver(X[::step, ::step], Y[::step, ::step], field.wx[::step, ::step],
+                           field.wy[::step, ::step], color=color, scale=110, width=0.005,
+                           alpha=alpha)
+
+    def step(self, field):
+        s = self.step_n
+        self.q.set_UVC(field.wx[::s, ::s], field.wy[::s, ::s])
 
 
 def display_field(field, res=121, coarse_below=60):
@@ -266,10 +290,13 @@ def parse_args():
                     help="also store the raw rollouts in output/race_runs/, so figures can be "
                          "remade later without re-simulating (see load_runs)")
     ap.add_argument("--no-render", action="store_true", help="simulate and store only, draw nothing")
-    ap.add_argument("--style", choices=["simple", "rich"], default="simple",
-                    help="'simple': one-hue wind shade, thin arrows, no colour bar, no map "
-                         "captions - the one to present with. 'rich': the windy.com-style "
-                         "dark map with the animated particle flow.")
+    ap.add_argument("--no-gif", action="store_true",
+                    help="draw the stills (figure and panels) but skip the animation")
+    ap.add_argument("--style", choices=["sailing", "simple", "rich"], default="sailing",
+                    help="'sailing' (default): the repo house style - windy.com speed palette "
+                         "on a dark ground with a drifting particle flow, matching the sailing "
+                         "demos. 'simple': one hue banded into six flat steps on white, for ink "
+                         "and for projectors. ('rich' is the old name for 'sailing'.)")
     ap.add_argument("--tag", default="")
     return ap.parse_args()
 
@@ -537,8 +564,10 @@ def main():
         print(f"runs stored -> {p}")
 
     if not args.no_render:
-        animate(evolving, start, goal, goal_radius, runs, par, prefs, args, fuel_max)
+        figure(evolving, start, goal, goal_radius, runs, par, prefs, args)
         panels(evolving, start, goal, goal_radius, runs, par, prefs, args)
+        if not args.no_gif:
+            animate(evolving, start, goal, goal_radius, runs, par, prefs, args, fuel_max)
 
 
 def animate(evolving, start, goal, goal_radius, runs, par, prefs, args, fuel_max):
@@ -546,7 +575,10 @@ def animate(evolving, start, goal, goal_radius, runs, par, prefs, args, fuel_max
     frames = (n_steps + args.stride - 1) // args.stride + int(args.hold_s * args.fps)
 
     th = THEMES[args.style]
-    track, glow = th["track"], th["glow"]
+    track = dict(th["track"])
+    if len(prefs) == 1 and args.style != "simple":
+        track[prefs[0]] = SOLO
+    glow = th["glow"]
     fig = plt.figure(figsize=(13.2, 7.4), facecolor=th["bg"], dpi=args.dpi)
     if th["colorbar"]:
         # the wind scale is a horizontal strip UNDER the map: as a vertical bar beside it, its
@@ -590,7 +622,8 @@ def animate(evolving, start, goal, goal_radius, runs, par, prefs, args, fuel_max
     headline = ("One agent. A sea that will not hold still." if len(prefs) == 1
                 else "Three agents. Same sea. Same destination.")
     fig.text(0.015, 0.965, headline, color=th["fg"], fontsize=19, weight="bold", va="top")
-    fig.text(0.015, 0.915, SUBTITLE.get(args.scenario, SUBTITLE["drift"]).format(
+    subs = SOLO_SUBTITLE if len(prefs) == 1 else SUBTITLE
+    fig.text(0.015, 0.915, subs.get(args.scenario, subs["drift"]).format(
         region=args.region.replace("_", " "), when=str(evolving.times[0])[:10]),
         color=th["muted"], fontsize=12.5, va="top")
     clock = fig.text(0.985, 0.965, "", color=th["fg"], fontsize=17, weight="bold",
@@ -659,10 +692,61 @@ def animate(evolving, start, goal, goal_radius, runs, par, prefs, args, fuel_max
         print(f"saved {out}  ({mb:.1f} MB, {frames} frames)")
 
 
+def figure(evolving, start, goal, goal_radius, runs, par, prefs, args):
+    """
+    One map, the finished routes, the numbers in the corner.
+
+    The single still a paper or a slide actually wants: no time series of panels, no animation,
+    just the problem and its three answers. For a fixed wind map this is the whole result.
+    """
+    th = THEMES[args.style]
+    track = dict(th["track"])
+    if len(prefs) == 1 and args.style != "simple":
+        track[prefs[0]] = SOLO
+    dt = par[prefs[0]].dt
+    n_steps = max(len(r["traj"]) for r in runs.values())
+    # a fixed map has nothing to choose between; an evolving one is shown at arrival
+    field = evolving.at((n_steps - 1) * dt if args.scenario != "fixed" else 0.0)
+
+    fig, ax = plt.subplots(figsize=(7.6, 7.2), facecolor=th["bg"])
+    _paint(ax, field, args.ms_per_unit, step=5, animated=False, theme=th,
+           max_ms=getattr(args, "wind_max_ms", None))
+    _dress_map(ax, evolving.fields[0].extent, start, goal, goal_radius, theme=th)
+    fuel_max = max(r["fuel"][-1] for r in runs.values()) or 1.0
+    for n in prefs:
+        r = runs[n]
+        ax.plot(r["traj"][:, 0], r["traj"][:, 1], color=track[n], lw=th["track_lw"],
+                path_effects=th["glow"], solid_capstyle="round", zorder=5,
+                label=(f"{PLAIN[n]}   {r['hours']:.1f} h   {r['fuel'][-1]:.0f} fuel" if len(prefs) == 1
+                       else f"{PLAIN[n]}   {r['hours']:.1f} h   "
+                            f"{100 * r['fuel'][-1] / fuel_max:.0f}% fuel"))
+        ax.plot(r["traj"][-1, 0], r["traj"][-1, 1], "o", color=track[n], mec=th["bg"],
+                mew=1.5, ms=11, zorder=6)
+    leg = ax.legend(loc="upper left", fontsize=10, framealpha=0.75, facecolor=th["bg"],
+                    edgecolor=th["frame"], labelcolor=th["fg"])
+    leg.set_zorder(10)
+    solo = len(prefs) == 1
+    title = {
+        "fixed": "One wind map, one agent" if solo else "One wind map, three priorities",
+        "drift": ("A wind map that changes while the agent sails" if solo
+                  else "A wind map that changes while they sail"),
+        "real": f"Open-Meteo forecast, {args.region.replace('_', ' ').title()}",
+    }
+    ax.set_title(title.get(args.scenario, "One sea, three priorities"), color=th["fg"],
+                 fontsize=15, weight="bold", pad=10)
+    fig.tight_layout()
+    out = os.path.join(OUTPUT_DIR, f"race_{args.scenario}{args.tag}_figure.png")
+    fig.savefig(out, dpi=150, facecolor=th["bg"])
+    plt.close(fig)
+    print(f"saved {out}")
+
+
 def panels(evolving, start, goal, goal_radius, runs, par, prefs, args):
     """Four stills across the voyage, for slides where a GIF will not play."""
     th = THEMES[args.style]
-    track = th["track"]
+    track = dict(th["track"])
+    if len(prefs) == 1 and args.style != "simple":
+        track[prefs[0]] = SOLO
     n_steps = max(len(r["traj"]) for r in runs.values())
     picks = [0, n_steps // 3, 2 * n_steps // 3, n_steps - 1]
     dt = par[prefs[0]].dt

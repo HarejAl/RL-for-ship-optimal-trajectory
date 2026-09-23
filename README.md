@@ -255,24 +255,32 @@ half, and the fuel saver dives south, picks up a favourable flank and arrives at
 quarter. The routes are visibly different, which is the point - it is not three speeds along
 one line.
 
-Four kinds of map, one script:
+Five demos, one script. Each writes three things: `_figure.png` (one map, the finished routes,
+the numbers - the still a slide or a paper wants), `_panels.png` (four stages across the voyage)
+and a `.gif`.
 
 ```bash
-python evolving_race.py --scenario fixed --field-seed 31 --start 0.8 1.4 --goal 9.0 8.4
-python evolving_race.py --scenario drift --field-seed 31 --prefs balanced          # one agent
-python evolving_race.py --scenario drift --field-seed 31                           # all three
-python evolving_race.py --scenario real  --region bay_of_biscay --start 9.0 8.4 --goal 0.8 1.4
+python evolving_race.py --scenario fixed --field-seed 31 --prefs balanced --tag _solo
+python evolving_race.py --scenario fixed --field-seed 31
+python evolving_race.py --scenario drift --field-seed 31 --prefs balanced --tag _solo
+python evolving_race.py --scenario drift --field-seed 31
+python evolving_race.py --scenario real --region bay_of_biscay --start 9.0 8.4 --goal 0.8 1.4
 ```
+
+(the four above take `--start 0.8 1.4 --goal 9.0 8.4 --max-steps 450`)
 
 | output | map | agents | result |
 | --- | --- | --- | --- |
-| `race_fixed` | one generated field, unchanging | three | 10.7 h / 14.3 h / 24.0 h, fuel 100 / 54 / 22% |
+| `race_fixed_solo` | one generated field, unchanging | one | the base problem: 24.0 h, 306 fuel |
+| `race_fixed` | the same field | three | 10.7 / 14.3 / 24.0 h, fuel 100 / 54 / 22% |
 | `race_drift_solo` | the same field, drifting | one | the map moves under a single route |
-| `race_drift` | the same field, drifting | three | 11.6 h / 15.7 h / 24.3 h, fuel 100 / 49 / 24% |
-| `race_real` | Open-Meteo, Bay of Biscay | three | 17.9 h / 32.3 h / 40.9 h, fuel 100 / 37 / **10%** |
+| `race_drift` | the same field, drifting | three | 11.6 / 15.7 / 24.3 h, fuel 100 / 49 / 24% |
+| `race_real` | Open-Meteo, Bay of Biscay | three | 17.9 / 32.3 / 40.9 h, fuel 100 / 37 / **10%** |
 
-`fixed` and `drift` deliberately share field 31 and the same corner-to-corner route, so putting
-the two side by side shows exactly what the weather changing does to the same problem.
+All five share field 31 (bar the forecast) and the same corner-to-corner route on purpose, so
+they can be shown in sequence: one agent on a map that holds still, then the same agent when the
+map will not, then what three different instructions do to it, then the same thing on a real
+forecast. A lone agent is drawn in the sailing demos' own agent cyan (`#00e5ff`).
 
 `real` pulls hourly Open-Meteo 10 m wind (no API key, cached under `output/cache`) and runs it on
 **the forecast's own clock**: the field metadata gives 62 km per model length unit and 2.5 (m/s)
@@ -284,16 +292,18 @@ colour scale is auto-fitted to each window or the map renders blank; and on most
 `fast` agent simply times out - of 15 region-route combinations only three had all three agents
 arriving.
 
-Two looks are available. `--style simple` (the default) is the one to present with: the wind is
-banded into six flat shades of one hue, the arrows are thin and grey, there is no colour bar and
-no lettering on the map, so the three coloured tracks are the only thing competing for
-attention. `--style rich` is the windy.com-style dark map with the animated particle flow -
-better on a screen you control, busier than it needs to be on a projector.
+Two looks. `--style sailing` (the default) is the house style of this repo, identical to the
+sailing demos: the windy.com speed palette on the same dark ground (`#04121f`), white quivers,
+and a drifting particle flow in the animations, so a talk can cut between the ship and the
+sailboat work without the audience re-learning the picture. The clutter is still gone - no
+lettering on the map, no agent subtitles - the colour is the wind and nothing else.
+`--style simple` is the ink-saving alternative: one hue banded into six flat steps on white.
 
-Banding the wind is not only a visual choice: a smooth light gradient dithers into hundreds of
-near-identical greys, which took the GIF from 2 MB to 14 MB, and requantising that to a small
-palette made the blue and the green agent come out the same teal. Six flat bands fixed all of
-it - the default animation is **1.5 MB**.
+Banding the wind in the `simple` style is not only a visual choice: a smooth light gradient
+dithers into hundreds of near-identical greys, which took one GIF from 2 MB to 14 MB, and
+requantising that to a small palette made the blue and the green agent come out the same teal.
+Six flat bands fixed both, and that style's animations come out around 1.5 MB against the
+colour style's 3-6 MB.
 
 The weather is a generated field sliding across the domain rather than one of the synthetic set
 pieces in `evolving_scenario_demo.py`. Those are deliberately stronger than anything the wind
