@@ -27,6 +27,7 @@ loop, amortising the cost of re-solving the routing problem each time the foreca
 | `dp_dataset_prefs.py` | One pass over the training fields producing one DP-teacher dataset per preference, on identical fields, goals, starts and random states. |
 | `merge_teacher_npz.py` | Concatenate the shards of parallel `dp_dataset_prefs.py` workers. |
 | `compare_preferences.py` | Roll the preference agents out on shared held-out cases; success, time-energy Pareto, cross-cost matrix, figures. |
+| `evolving_race.py` | Presentation animation: the three preference agents race across a drifting wind map, with plain-language fuel and time readouts. |
 | `tests/test_core.py` | Unit and sanity tests (interpolation, dynamics, environment, DP on zero wind and uniform wind). |
 | `legacy/` | The original single-field TD3 code (`env.py`, `main.py`). `trained_model.zip` was trained with this legacy environment and is **not** compatible with the new dynamics. |
 | `WF.pkl` | The original precomputed wind field (speed and direction). |
@@ -233,6 +234,37 @@ towards on-distribution rollout states (`--rollout-frac 0.5`) cut validation MSE
 0.13 but left success at 23%, and keeping the best-validation epoch (`--keep-best`) changed
 nothing. The relative comparison between the three agents is unaffected — they are trained,
 evaluated and scored on identical data budgets and identical cases.
+
+### Showing it to a non-technical audience
+
+`evolving_race.py` races the three agents across a wind map that drifts while they sail, with
+the jargon stripped out: the ships are labelled IN A HURRY / BALANCED / FUEL SAVER, the
+readouts are hours at sea and a fuel bar scaled to the thirstiest ship, and the wind scale runs
+"calm on the left, storm on the right".
+
+```bash
+python evolving_race.py
+```
+
+On the default case (generated field 31 drifting 6 units east and 3 north, corner to corner,
+10.8 of the 12 map units apart) the three ships tell the story without a caption: the hurried
+ship arrives in 11.6 h having burned all of its fuel budget, the balanced one 4 h later on
+half, and the fuel saver dives south, picks up a favourable flank and arrives at 24.3 h on a
+quarter. The routes are visibly different, which is the point - it is not three speeds along
+one line.
+
+The weather is a generated field sliding across the domain rather than one of the synthetic set
+pieces in `evolving_scenario_demo.py`. Those are deliberately stronger than anything the wind
+generator produces (cyclones at strength 11, deepening gale fronts), which makes them good
+stress tests and bad demos: the clones are far outside their training distribution there and
+simply thrash - measured, all three time out or wander on every set piece tried. Drifting a
+generated field keeps magnitudes and correlation lengths exactly those of training, so the
+weather moves without leaving the distribution.
+
+Because these clones only arrive on about a third of crossings, the demo case is selected, not
+representative: 40 fields x 3 routes were swept for cases where all three ships arrive, in the
+expected order, by visibly different paths. Say so if anyone asks what a typical crossing looks
+like.
 
 Still to run (needs the GPU): the remaining 76 fields of the teacher datasets, and
 `compare_preferences.py` without `--no-dp`, which adds the DP optimum for each objective and
