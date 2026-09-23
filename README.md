@@ -23,6 +23,10 @@ loop, amortising the cost of re-solving the routing problem each time the foreca
 | `wind_obs.py` | Wind-aware observations: `WindObsWrapper` (state vector + ego-centric wind crop + coarse global map), `WindFieldPool`, `WindCNNExtractor` for SB3. |
 | `train_wind_aware.py` | Train TD3 or SAC with the CNN extractor on a pool of generated fields, validating on held-out fields. |
 | `compare_policy.py` | Plot DP and RL trajectories side by side on held-out cases. |
+| `preferences.py` | The cost-weight presets of the multi-objective study (`fast` / `balanced` / `eco`) and the helpers every script uses to agree on them. |
+| `dp_dataset_prefs.py` | One pass over the training fields producing one DP-teacher dataset per preference, on identical fields, goals, starts and random states. |
+| `merge_teacher_npz.py` | Concatenate the shards of parallel `dp_dataset_prefs.py` workers. |
+| `compare_preferences.py` | Roll the preference agents out on shared held-out cases; success, time-energy Pareto, cross-cost matrix, figures. |
 | `tests/test_core.py` | Unit and sanity tests (interpolation, dynamics, environment, DP on zero wind and uniform wind). |
 | `legacy/` | The original single-field TD3 code (`env.py`, `main.py`). `trained_model.zip` was trained with this legacy environment and is **not** compatible with the new dynamics. |
 | `WF.pkl` | The original precomputed wind field (speed and direction). |
@@ -149,6 +153,93 @@ Findings on the updated task:
 
 ---
 
+## Multi-objective agents: time priority vs energy priority (2026-09-22)
+
+The stage cost is `l(u) = dt * (time_w + ctrl_w |u|^2)`, so an agent's *preference* is
+nothing but the exchange rate between travel time and control energy. Three presets
+(`preferences.py`) span a decade of that ratio:
+
+| agent | `ctrl_w` | intent |
+| --- | --- | --- |
+| `fast` | 1e-3 | energy nearly free: arrive as early as possible |
+| `balanced` | 1e-2 | the repo default weighting |
+| `eco` | 1e-1 | energy dominates: spend as little thrust as possible |
+
+Everything else — dynamics, wind generator, goal disc, observation, network — is identical,
+so any difference between the agents comes from the objective alone.
+
+### Pipeline
+
+Training from scratch is not an option here (the CNN observation does not learn under plain
+TD3, see the ablation below), so each agent is a behaviour clone of a DP teacher solved under
+*its own* cost:
+
+```bash
+python dp_dataset_prefs.py --n-fields 75 --goals-per-field 1 --rollouts 20 --random-states 2500
+python merge_teacher_npz.py --inputs dp_teacher_pref dp_teacher_prefB --out dp_teacher_all
+python pretrain_bc.py --data data/dp_teacher_all_fast.npz --tag pref_fast --pref fast --epochs 15
+python compare_preferences.py --n-cases 200 --tag-prefix pref
+```
+
+`dp_dataset_prefs.py` draws each case once and labels it with all three teachers: same fields,
+same goals, same rollout starts, same random states. `ValueIterationPlanner.set_cost_weights`
+re-targets the planner at a new cost while keeping the successor-cell and interpolation-weight
+precompute, which depends on the dynamics only — so the second and third teacher of a case cost
+one value iteration each and nothing else.
+
+Two facts make the evaluation cheap. First, a trajectory's cost under *any* preference is an
+affine function of two numbers,
+
+    J_p = time_w(p) * T + ctrl_w(p) * E,    T = arrival time,  E = sum |u|^2 dt,
+
+so one rollout per agent can be re-priced under every objective. Second, the DP optimum for
+each objective on a benchmark case comes from one shared precompute plus three value iterations.
+
+### Result: the three agents are genuinely different policies
+
+200 held-out generated fields, unseen in training; the cross-cost matrix is the mean cost over
+the 24 cases all three agents solved.
+
+| agent | success | median `T` | median `E` | mean `T` | mean `E` | online |
+| --- | --- | --- | --- | --- | --- | --- |
+| `fast` | 36% | 2.25 | 271 | 2.09 | 270 | 43 ms |
+| `balanced` | 36% | 2.95 | 143 | 2.65 | 156 | 56 ms |
+| `eco` | 29% | 4.50 | 41 | 4.87 | 90 | 83 ms |
+
+Cross-cost matrix (mean `J`, best in each column in bold):
+
+| agent \ objective | `J_fast` | `J_balanced` | `J_eco` |
+| --- | --- | --- | --- |
+| `fast` | **2.36** | 4.79 | 29.14 |
+| `balanced` | 2.80 | **4.21** | 18.24 |
+| `eco` | 4.96 | 5.77 | **13.90** |
+
+Every objective is won by the agent trained for it — the diagonal is minimal in all three
+columns, which is the property that makes these three distinct agents rather than three noisy
+copies of one policy. The behavioural span is 2.3x in arrival time against 3.0x in energy.
+`output/preference_trajectories.png` shows why: `fast` and `balanced` stay near the direct
+line at high thrust, while `eco` takes visibly longer detours that ride the wind and arrives
+with a fraction of the energy.
+
+### Caveat: success rate is data-limited, not method-limited
+
+These clones reach 29-36% success, against the 83% of `bc_t2` on the same task. The difference
+is the teacher dataset: `bc_t2` was cloned from 300 (field, goal) pairs and 768k labelled
+states, these agents from 74 pairs and 250-310k states (the data run was stopped at half its
+planned length). This matches the trend already recorded for the original task — 37 fields gave
+20-30% success, 150 fields x 2 goals gave 83% — so the fix is more DP solves, not a different
+recipe. Two things that do *not* help were checked on the `balanced` agent: rebalancing the mix
+towards on-distribution rollout states (`--rollout-frac 0.5`) cut validation MSE from 0.22 to
+0.13 but left success at 23%, and keeping the best-validation epoch (`--keep-best`) changed
+nothing. The relative comparison between the three agents is unaffected — they are trained,
+evaluated and scored on identical data budgets and identical cases.
+
+Still to run (needs the GPU): the remaining 76 fields of the teacher datasets, and
+`compare_preferences.py` without `--no-dp`, which adds the DP optimum for each objective and
+therefore the per-objective optimality gap of each agent.
+
+---
+
 ## Earlier results — original task, 0.25 disc (2026-09-08)
 
 Single-field control experiment: a plain MLP TD3 policy trained on the legacy field
@@ -255,6 +346,6 @@ the goal, see `output/compare_bc_v2_hard.png`); case 8 is a DP greedy-rollout fa
 
 1. Done: physically consistent dynamics, seeded environment, wind-field generator, DP baseline and benchmark harness.
 2. Done: wind-aware CNN policy via DP-teacher behaviour cloning (`bc_t2`: 83% success, median gap 3.5% on the current task; DAgger no longer needed with the 0.5 disc). Next: harder-case data (edge goals, stronger wind), a fast competitive planner as the speed reference, grid-refinement study of the DP teacher.
-3. Preference-conditioned policy: the cost weight ratio as an input, giving the whole fast-to-economical Pareto front from one network.
+3. Partly done: **separate** agents per cost weighting (`pref_fast`, `pref_balanced`, `pref_eco`), each behaviour-cloned from its own DP teacher — each wins its own objective, spanning 2.3x in arrival time against 3.0x in energy (see the multi-objective section). Outstanding: finish their teacher datasets (74 of 150 fields collected, which is what caps success at ~30%) and add the DP optimality gap per objective. Then the **preference-conditioned** policy: the cost-weight ratio as a network input, giving the whole fast-to-economical Pareto front from one network, with these three agents as the baseline to beat.
 4. Time-varying wind: receding-horizon execution where the field is swapped at each forecast step, compared with re-solved DP.
 5. Real forecast data (for example ERA5 10 m wind) and a 3-DOF ship model.

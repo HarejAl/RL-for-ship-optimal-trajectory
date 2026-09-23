@@ -1,0 +1,67 @@
+# journal.mplstyle
+# Publication-ready matplotlib style: serif (Computer Modern), Okabe–Ito palette,
+# inward ticks, thin axis frame, constrained-layout-friendly margins.
+#
+# Usage:
+#   import matplotlib.pyplot as plt
+#   plt.style.use('/path/to/journal.mplstyle')
+#
+# Or drop the file in your matplotlib config dir
+# (~/.config/matplotlib/stylelib/ on Linux/macOS, %USERPROFILE%\.matplotlib\stylelib\ on Windows)
+# and then use:
+#   plt.style.use('journal')
+
+# ---- Fonts ---------------------------------------------------------------
+font.family            : serif
+font.size              : 10
+axes.labelsize         : 10
+xtick.labelsize        : 9
+ytick.labelsize        : 9
+legend.fontsize        : 9
+
+# ---- Color cycle (Okabe–Ito, colorblind-safe) ----------------------------
+axes.prop_cycle        : cycler('color', ['0072B2', 'D55E00', '009E73', 'E69F00', 'CC79A7', '56B4E9'])
+
+# ---- Lines & markers -----------------------------------------------------
+lines.linewidth        : 1.5
+lines.markersize       : 4
+errorbar.capsize       : 3
+
+# ---- Axes ----------------------------------------------------------------
+axes.linewidth         : 0.8
+axes.xmargin           : 0.02
+axes.ymargin           : 0.02
+
+# ---- Ticks (inward, with minor ticks visible) ----------------------------
+xtick.direction        : in
+ytick.direction        : in
+xtick.minor.visible    : True
+ytick.minor.visible    : True
+xtick.major.size       : 4
+ytick.major.size       : 4
+xtick.minor.size       : 2
+ytick.minor.size       : 2
+xtick.major.width      : 0.8
+ytick.major.width      : 0.8
+xtick.minor.width      : 0.6
+ytick.minor.width      : 0.6
+
+# ---- Legend --------------------------------------------------------------
+legend.frameon         : False
+
+# ---- Saving --------------------------------------------------------------
+savefig.bbox           : tight
+savefig.dpi            : 300
+
+# ---- Math / TeX ----------------------------------------------------------
+# Default: no system LaTeX required — use matplotlib's Computer Modern mathtext.
+text.usetex            : False
+mathtext.fontset       : cm
+
+# If a working LaTeX installation is available and you want true LaTeX rendering,
+# comment out the two lines above and uncomment the block below:
+#
+# text.usetex          : True
+# text.latex.preamble  : \usepackage{amsmath} \usepackage{amssymb}
+# pgf.texsystem        : pdflatex
+# pgf.rcfonts          : False

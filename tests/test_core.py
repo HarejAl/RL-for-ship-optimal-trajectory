@@ -16,6 +16,7 @@ from dynamics import ShipParams, ship_step, terminal_speed  # noqa: E402
 from wind import WindField, generate_wind_field, uniform_wind_field  # noqa: E402
 from env import ShipEnv  # noqa: E402
 from dp_baseline import ValueIterationPlanner  # noqa: E402
+import preferences as P  # noqa: E402
 
 LEGACY = os.path.join(REPO_DIR, "WF.pkl")
 
@@ -222,3 +223,55 @@ def test_goal_radius_curriculum_shrinks_with_success():
             if term or trunc:
                 break
     assert env.current_radius == 0.25  # never below goal_radius
+
+
+# -------------------------------------------------------- cost preferences
+def test_preference_params_change_only_the_cost_weights():
+    base = ShipParams()
+    for name in P.ORDER:
+        p = P.params(name)
+        assert (p.dt, p.cd_water, p.cd_air, p.u_max) == (base.dt, base.cd_water, base.cd_air, base.u_max)
+    assert P.params("fast").ctrl_w < P.params("balanced").ctrl_w < P.params("eco").ctrl_w
+    with pytest.raises(KeyError):
+        P.params("nonexistent")
+
+
+def test_env_cost_is_time_plus_weighted_energy():
+    """J accumulated by the env equals time_w * T + ctrl_w * E, which is what lets
+    compare_preferences.py re-price one rollout under every preference."""
+    for name in P.ORDER:
+        p = P.params(name)
+        env = ShipEnv(uniform_wind_field(), params=p, max_steps=40)
+        env.reset(seed=1, options=dict(start=(2.0, 2.0), goal=(9.0, 9.0)))
+        acts = []
+        for k in range(30):
+            u = np.array([3.0 + 0.1 * k, -2.0])
+            acts.append(u)
+            _, _, term, trunc, info = env.step(u)
+            if term or trunc:
+                break
+        E = P.energy(acts[:len(acts)], p)
+        assert info["J"] == pytest.approx(p.time_w * info["t"] + p.ctrl_w * E, rel=1e-9)
+
+
+def test_set_cost_weights_reuses_the_precompute_and_changes_the_optimum():
+    """Re-targeting the planner must keep the dynamics precompute and give a cheaper,
+    slower optimum for the energy-priority cost."""
+    wind = uniform_wind_field()
+    goal = np.array([8.0, 5.0])
+    planner = ValueIterationPlanner(wind, goal, params=P.params("fast"), nx=31, ny=31, nv=9)
+    idx_before = planner.idx
+    out = {}
+    for name in ("fast", "eco"):
+        planner.set_cost_weights(P.params(name))
+        assert planner.idx is idx_before          # dynamics precompute reused
+        assert float(planner.V.abs().max()) == 0.0  # value function reset
+        planner.solve(verbose=False)
+        env = ShipEnv(wind, params=P.params(name))
+        out[name] = planner.rollout(env, np.array([1.5, 5.0]))
+    E = {k: float((v["actions"] ** 2).sum() * ShipParams().dt) for k, v in out.items()}
+    assert out["eco"]["t"] > out["fast"]["t"]     # the eco optimum takes longer
+    assert E["eco"] < E["fast"]                   # and spends less energy
+
+    with pytest.raises(ValueError):               # dynamics may not change
+        planner.set_cost_weights(ShipParams(u_max=5.0))

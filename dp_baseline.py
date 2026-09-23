@@ -191,6 +191,29 @@ class ValueIterationPlanner:
             out.addcmul_(w if w.dtype == V.dtype else w.to(V.dtype), g)
         return out
 
+    # ------------------------------------------------------- cost weights
+    def set_cost_weights(self, params):
+        """
+        Re-target the planner at a different stage cost (same dynamics).
+
+        Only `time_w` and `ctrl_w` of `params` may differ from the ones the planner was
+        built with: the successor cells and interpolation weights - by far the most
+        expensive part of the setup - depend on the dynamics only, so the whole
+        precompute is reused and solving a second preference costs one more value
+        iteration and nothing else. The value function is reset, since it is the
+        fixed point of the *previous* cost.
+        """
+        for f in ("dt", "cd_water", "cd_air", "u_max"):
+            if getattr(params, f) != getattr(self.p, f):
+                raise ValueError(f"set_cost_weights may only change the cost weights, {f} differs")
+        self.p = params
+        self.act_cost = stage_cost(self.actions[:, 0], self.actions[:, 1], self.p)
+        self.V = torch.zeros(self.N, device=self.device)
+        self.history = []
+        self.iterations = 0
+        self.solve_time = 0.0
+        return self
+
     # ----------------------------------------------------------------- solve
     @torch.no_grad()
     def solve(self, max_iter=3000, tol=1e-4, verbose=True, log_every=100):

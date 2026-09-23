@@ -36,6 +36,13 @@ def parse_args():
     ap.add_argument("--batch-size", type=int, default=512)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--max-samples", type=int, default=None)
+    ap.add_argument("--rollout-frac", type=float, default=None,
+                    help="target share of DP-rollout (on-distribution) states in the training mix; "
+                         "the uniformly random states are subsampled to reach it. Closed-loop success "
+                         "depends on the states the policy actually visits, so a dataset dominated by "
+                         "random states clones the value landscape but not the route.")
+    ap.add_argument("--keep-best", action="store_true",
+                    help="save the epoch with the lowest validation MSE instead of the last epoch")
     ap.add_argument("--val-frac", type=float, default=0.1)
     ap.add_argument("--local-size", type=float, default=2.0)
     ap.add_argument("--local-res", type=int, default=16)
@@ -44,6 +51,11 @@ def parse_args():
     ap.add_argument("--eval-episodes", type=int, default=30)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    import preferences as P
+    ap.add_argument("--pref", choices=list(P.PREFERENCES), default=None,
+                    help="cost-weight preset of the teacher that produced --data; it does not change the "
+                         "regression (the labels already carry the preference), only the cost weights of "
+                         "the roll-out evaluation printed at the end")
     return ap.parse_args()
 
 
@@ -73,9 +85,10 @@ def build_observations(data, obs_cfg, idx):
     return out
 
 
-def evaluate(model, obs_cfg, n_episodes, seed):
+def evaluate(model, obs_cfg, n_episodes, seed, params=None):
     pool = WindFieldPool(20, seed_base=EVAL_SEED_BASE)
-    env = make_wind_env(pool=pool, obs_cfg=obs_cfg, monitor=False)
+    env = make_wind_env(pool=pool, obs_cfg=obs_cfg, monitor=False,
+                        env_kwargs=None if params is None else dict(params=params))
     succ, J, T = [], [], []
     for ep in range(n_episodes):
         obs, _ = env.reset(seed=seed + ep)
@@ -105,6 +118,14 @@ def main():
     idx = np.arange(N)
     if args.max_samples and N > args.max_samples:
         idx = rng.choice(N, args.max_samples, replace=False)
+    if args.rollout_frac:
+        roll = idx[data["source"][idx] == 0]
+        rand = idx[data["source"][idx] != 0]
+        keep = int(len(roll) * (1.0 - args.rollout_frac) / max(args.rollout_frac, 1e-9))
+        if keep < len(rand):
+            rand = rng.choice(rand, keep, replace=False)
+        idx = np.sort(np.concatenate((roll, rand)))
+
     print(f"dataset {args.data}: {N:,} rows, using {len(idx):,}  "
           f"(rollout {int((data['source'][idx] == 0).sum()):,}, random {int((data['source'][idx] == 1).sum()):,})")
 
@@ -152,6 +173,7 @@ def main():
     print(f"val MSE before training: {val_loss():.4f}")
     steps_per_epoch = int(np.ceil(len(tr) / args.batch_size))
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=args.epochs * steps_per_epoch)
+    best = (np.inf, None)
     for ep in range(1, args.epochs + 1):
         perm = rng.permutation(tr)
         t0, run = time.perf_counter(), 0.0
@@ -163,17 +185,26 @@ def main():
             opt.step()
             sched.step()
             run += loss.item() * len(y)
-        print(f"epoch {ep:3d}  train MSE {run / len(perm):.4f}  val MSE {val_loss():.4f}  "
+        vl = val_loss()
+        if vl < best[0]:
+            best = (vl, {k: v.detach().clone() for k, v in actor.state_dict().items()})
+        print(f"epoch {ep:3d}  train MSE {run / len(perm):.4f}  val MSE {vl:.4f}  "
               f"{time.perf_counter() - t0:.0f}s", flush=True)
 
+    if args.keep_best and best[1] is not None:
+        actor.load_state_dict(best[1])
+        print(f"restored the best epoch (val MSE {best[0]:.4f})")
     model.actor_target.load_state_dict(model.actor.state_dict())
     out = os.path.join(MODEL_DIR, f"{args.tag}.zip")
     model.save(out)
     WindObsWrapper.save_config(os.path.join(MODEL_DIR, f"{args.tag}.json"), obs_cfg)
     print(f"saved {out}")
 
-    res = evaluate(model, obs_cfg, args.eval_episodes, seed=args.seed + 777)
-    print(f"held-out rollout (fixed goal radius): success {res['success'] * 100:.0f}%  "
+    import preferences as P
+    p_eval = P.params(args.pref) if args.pref else None
+    res = evaluate(model, obs_cfg, args.eval_episodes, seed=args.seed + 777, params=p_eval)
+    print(f"held-out rollout (fixed goal radius, cost = {args.pref or 'default'}): "
+          f"success {res['success'] * 100:.0f}%  "
           f"mean J on successes {res['J_succ']:.2f}  mean T {res['t_succ']:.2f}s")
 
 
