@@ -292,6 +292,11 @@ colour scale is auto-fitted to each window or the map renders blank; and on most
 `fast` agent simply times out - of 15 region-route combinations only three had all three agents
 arriving.
 
+The animations play at `--fps` x `--stride` simulation steps per second: 12 x 1 by default, so
+every step is drawn and a crossing takes 11-17 seconds. (It used to be 20 x 2, which was three
+times faster and skipped every other step.) `--hold-s` keeps the finished picture on screen at
+the end.
+
 Two looks. `--style sailing` (the default) is the house style of this repo, identical to the
 sailing demos: the windy.com speed palette on the same dark ground (`#04121f`), white quivers,
 and a drifting particle flow in the animations, so a talk can cut between the ship and the
@@ -299,11 +304,14 @@ sailboat work without the audience re-learning the picture. The clutter is still
 lettering on the map, no agent subtitles - the colour is the wind and nothing else.
 `--style simple` is the ink-saving alternative: one hue banded into six flat steps on white.
 
-Banding the wind in the `simple` style is not only a visual choice: a smooth light gradient
-dithers into hundreds of near-identical greys, which took one GIF from 2 MB to 14 MB, and
-requantising that to a small palette made the blue and the green agent come out the same teal.
-Six flat bands fixed both, and that style's animations come out around 1.5 MB against the
-colour style's 3-6 MB.
+Both styles band the speed into flat steps rather than a smooth ramp - six for `simple`, sixteen
+for `sailing`, which still reads as a continuous weather map. That is a file-size decision as
+much as a visual one. A smooth gradient dithers into hundreds of near-identical shades, and with
+every step drawn the wind map is repainted constantly: the colour animations came out at 17 MB
+banded at 16 steps they are 3-5 MB, and the light style drops from 14 MB to about 2. Requantising
+to a shared palette afterwards helps the banded maps (`--gif-colors`, on by default) but ruined
+the smooth ones - at 64 colours the background crowded out the tracks and two agents came out the
+same colour.
 
 The weather is a generated field sliding across the domain rather than one of the synthetic set
 pieces in `evolving_scenario_demo.py`. Those are deliberately stronger than anything the wind

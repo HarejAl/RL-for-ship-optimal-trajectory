@@ -104,7 +104,7 @@ THEMES = {
                     particles=True, colorbar=True, subtitles=False, map_labels=False,
                     arrow_color="white", arrow_alpha=0.55, glow=GLOW,
                     marker="white", bar_bg="#12293b", track_lw=3.0,
-                    levels=None, shading="gouraud"),
+                    levels=16, shading="auto"),
     "simple": dict(bg="white", fg="#16202b", muted="#6b7280", frame="#c3ccd6",
                    track=dict(P.COLORS), cmap=_calm_cmap, norm_max=1.0,
                    particles=False, colorbar=False, subtitles=False, map_labels=False,
@@ -271,9 +271,13 @@ def parse_args():
                     help="top of the wind colour scale in m/s; default is the peak of "
                          "the window being drawn, so weak real forecasts still show relief")
     ap.add_argument("--max-steps", type=int, default=700)
-    ap.add_argument("--fps", type=int, default=20)
-    ap.add_argument("--stride", type=int, default=2)
-    ap.add_argument("--hold-s", type=float, default=1.6, help="seconds to hold the final frame")
+    ap.add_argument("--fps", type=int, default=12,
+                    help="playback rate. With --stride this sets the pace: the voyage plays "
+                         "at fps*stride simulation steps per second, so 12 and 1 is a third "
+                         "the speed of 20 and 2.")
+    ap.add_argument("--stride", type=int, default=1,
+                    help="draw every Nth simulation step; 1 is every step (smoothest)")
+    ap.add_argument("--hold-s", type=float, default=2.5, help="seconds to hold the final frame")
     ap.add_argument("--dpi", type=int, default=76, help="animation resolution; the GIF is a full-frame "
                                                         "animated map, so this drives the file size")
     ap.add_argument("--gif-colors", type=int, default=None,
@@ -282,7 +286,7 @@ def parse_args():
                          "map, where the palette is small anyway, and a loss for 'rich', whose "
                          "full-spectrum map needs every slot (and where it also discards the "
                          "per-frame cropping Pillow already did).")
-    ap.add_argument("--map-every", type=int, default=4,
+    ap.add_argument("--map-every", type=int, default=2,
                     help="repaint the wind map every N frames (the agents still move every frame). "
                          "A background that is identical between frames is what lets the GIF store "
                          "only the changed region, so this is the main lever on file size.")
@@ -601,7 +605,10 @@ def animate(evolving, start, goal, goal_radius, runs, par, prefs, args, fuel_max
     _dress_map(ax, evolving.fields[0].extent, start, goal, goal_radius, theme=th)
     if th["colorbar"]:
         cb = fig.colorbar(im, cax=fig.add_subplot(gs[1, 0]), orientation="horizontal")
-        ticks, labels = wind_scale_ticks(args.ms_per_unit)
+        # the bar must tick over the SAME range the mesh is normalised to, or the
+        # auto-fitted scale leaves a blank tail past the window peak
+        ticks, labels = wind_scale_ticks(args.ms_per_unit, args.wind_max_ms or 25.0,
+                                         step=5.0 if (args.wind_max_ms or 25) > 12 else 2.5)
         cb.set_ticks(ticks)
         cb.set_ticklabels(labels)
         cb.set_label("wind speed (m/s)   -   calm on the left, storm on the right",
