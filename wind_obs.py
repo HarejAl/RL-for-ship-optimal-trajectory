@@ -47,6 +47,7 @@ POS_SCALE = 10.0
 VEL_SCALE = 6.0               # for the reference ship; see speed_scales()
 WIND_SCALE = 10.0
 REFERENCE_SPEED = ShipParams().scales().speed   # V* of the ship every model was trained on
+KAPPA_SCALE = 0.5             # windage ratio of the reference ship -> 1.0 in the observation
 
 
 def speed_scales(params):
@@ -71,20 +72,21 @@ class WindFieldPool:
 
 class WindObsWrapper(gym.ObservationWrapper):
     def __init__(self, env, local_size=2.0, local_res=16, global_res=16, use_global=True,
-                 blob_sigma=0.6):
+                 blob_sigma=0.6, add_kappa=False):
         super().__init__(env)
         self.local_size = float(local_size)
         self.local_res = int(local_res)
         self.global_res = int(global_res)
         self.use_global = bool(use_global)
         self.blob_sigma = float(blob_sigma)
+        self.add_kappa = bool(add_kappa)   # append the windage ratio kappa / KAPPA_SCALE to `vec`
 
         off = np.linspace(-self.local_size, self.local_size, self.local_res)
         self._ox, self._oy = np.meshgrid(off, off, indexing="ij")
         self._global_cache = (None, None)
 
         d = {
-            "vec": spaces.Box(-np.inf, np.inf, shape=(6,), dtype=np.float32),
+            "vec": spaces.Box(-np.inf, np.inf, shape=(7 if self.add_kappa else 6,), dtype=np.float32),
             "local": spaces.Box(-np.inf, np.inf, shape=(3, self.local_res, self.local_res), dtype=np.float32),
         }
         if self.use_global:
@@ -95,7 +97,8 @@ class WindObsWrapper(gym.ObservationWrapper):
     # ---------------------------------------------------------------- config
     def config(self):
         return dict(local_size=self.local_size, local_res=self.local_res,
-                    global_res=self.global_res, use_global=self.use_global, blob_sigma=self.blob_sigma)
+                    global_res=self.global_res, use_global=self.use_global, blob_sigma=self.blob_sigma,
+                    add_kappa=self.add_kappa)
 
     @staticmethod
     def save_config(path, cfg):
@@ -133,6 +136,8 @@ class WindObsWrapper(gym.ObservationWrapper):
 
         vec = np.array([(gx - x) / POS_SCALE, (gy - y) / POS_SCALE,
                         vx / vel_scale, vy / vel_scale, x / POS_SCALE, y / POS_SCALE], dtype=np.float32)
+        if self.add_kappa:
+            vec = np.append(vec, np.float32(base.p.scales().windage / KAPPA_SCALE))
 
         px = x + self._ox
         py = y + self._oy

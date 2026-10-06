@@ -45,14 +45,23 @@ def parse_args():
     ap.add_argument("--max-iter", type=int, default=3000)
     ap.add_argument("--tol", type=float, default=1e-4)
     ap.add_argument("--device", default=None)
-    ap.add_argument("--model", default=None, help="path to an SB3 TD3 model to evaluate on the same cases")
+    ap.add_argument("--model", default=None,
+                    help="SB3 model (.zip) or pure-RL checkpoint (.pt) to evaluate on the same cases")
+    ap.add_argument("--kappa", type=float, default=None,
+                    help="windage ratio c_a/c_w of the ship (default: the reference ship, 0.5)")
+    ap.add_argument("--wind-mult", type=float, default=1.0, help="multiply every wind field by this")
     ap.add_argument("--tag", default=None)
     return ap.parse_args()
 
 
 def load_model(path):
     """Load an SB3 model; returns (model, obs_cfg) where obs_cfg is the WindObsWrapper config
-    (from the .json sidecar) for wind-aware models, or None for plain-observation models."""
+    (from the .json sidecar) for wind-aware models, or None for plain-observation models.
+    A `.pt` path is a pure-RL PPO checkpoint (train_ppo.py)."""
+    if path.endswith(".pt"):
+        from ppo_policy import PPOPolicy
+        policy = PPOPolicy(path)
+        return policy, policy.obs_cfg
     from stable_baselines3 import TD3, SAC
     from gymnasium import spaces
     last_err = None
@@ -96,6 +105,8 @@ def main():
     args = parse_args()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     params = ShipParams()
+    if args.kappa is not None:
+        params = ShipParams(cd_air=args.kappa * params.cd_water)
     legacy = WindField.load_legacy(LEGACY_FIELD) if args.wind == "legacy" else None
     model, obs_cfg = (None, None)
     if args.model:
@@ -106,6 +117,8 @@ def main():
     for k in range(args.n_cases):
         case_seed = args.seed * 10_000 + k
         wind = legacy if legacy is not None else generate_wind_field(case_seed)
+        if args.wind_mult != 1.0:
+            wind = WindField(wind.x, wind.y, args.wind_mult * wind.wx, args.wind_mult * wind.wy, meta=wind.meta)
         env = ShipEnv(wind, params=params)
         env.reset(seed=case_seed)
         start, goal = env.state[:2].copy(), env.goal.copy()
