@@ -13,6 +13,13 @@ The local crop gives the policy the wind it is about to sail through; the coarse
 global map lets it route around regions it cannot see locally. All channels are
 scaled to O(1).
 
+Speeds (ship velocity and wind) are divided by the ship's own calm-water speed V*
+(`ShipParams.scales()`), expressed relative to the reference ship the policies were
+trained on: the "6" and "10" above hold for the default `ShipParams()` and grow with V*.
+For the default ship the observation is unchanged; for a faster or slower ship with
+the same windage ratio kappa it is exactly the observation of the reference ship in
+proportionally rescaled wind, so a trained policy transfers without retraining.
+
 `WindFieldPool` holds generated fields with a fixed seed namespace, so training
 fields (seeds >= TRAIN_SEED_BASE) never overlap the held-out benchmark fields used
 by `benchmark_dp.py` (seeds < 1e6).
@@ -29,6 +36,7 @@ import gymnasium as gym
 from gymnasium import spaces
 
 from wind import generate_wind_field
+from dynamics import ShipParams
 
 # Anchor all paths to this script's location
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -36,8 +44,15 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 TRAIN_SEED_BASE = 1_000_000   # training fields: seeds TRAIN_SEED_BASE + i
 EVAL_SEED_BASE = 2_000_000    # validation fields used during training
 POS_SCALE = 10.0
-VEL_SCALE = 6.0
+VEL_SCALE = 6.0               # for the reference ship; see speed_scales()
 WIND_SCALE = 10.0
+REFERENCE_SPEED = ShipParams().scales().speed   # V* of the ship every model was trained on
+
+
+def speed_scales(params):
+    """(velocity scale, wind scale) for a ship: the reference constants times V* / V*_ref."""
+    k = params.scales().speed / REFERENCE_SPEED
+    return VEL_SCALE * k, WIND_SCALE * k
 
 
 class WindFieldPool:
@@ -93,17 +108,19 @@ class WindObsWrapper(gym.ObservationWrapper):
             return json.load(f)
 
     # ----------------------------------------------------------------- maps
-    def _global_map(self, wind):
-        """Downsampled wind components on a GxG grid over the field extent (cached per field)."""
-        if self._global_cache[0] is wind:
+    def _global_map(self, wind, wind_scale):
+        """Downsampled wind components on a GxG grid over the field extent (cached per field
+        and wind scale)."""
+        key = self._global_cache[0]
+        if key is not None and key[0] is wind and key[1] == wind_scale:
             return self._global_cache[1]
         xmin, xmax, ymin, ymax = wind.extent
         gx = np.linspace(xmin, xmax, self.global_res)
         gy = np.linspace(ymin, ymax, self.global_res)
         GX, GY = np.meshgrid(gx, gy, indexing="ij")
         wx, wy = wind(GX, GY)
-        base = np.stack((wx / WIND_SCALE, wy / WIND_SCALE)).astype(np.float32)
-        self._global_cache = (wind, (base, GX, GY))
+        base = np.stack((wx / wind_scale, wy / wind_scale)).astype(np.float32)
+        self._global_cache = ((wind, wind_scale), (base, GX, GY))
         return self._global_cache[1]
 
     def observation(self, obs):
@@ -112,19 +129,20 @@ class WindObsWrapper(gym.ObservationWrapper):
         x, y, vx, vy = base.state
         gx, gy = base.goal
         xmin, xmax, ymin, ymax = wind.extent
+        vel_scale, wind_scale = speed_scales(base.p)
 
         vec = np.array([(gx - x) / POS_SCALE, (gy - y) / POS_SCALE,
-                        vx / VEL_SCALE, vy / VEL_SCALE, x / POS_SCALE, y / POS_SCALE], dtype=np.float32)
+                        vx / vel_scale, vy / vel_scale, x / POS_SCALE, y / POS_SCALE], dtype=np.float32)
 
         px = x + self._ox
         py = y + self._oy
         wx, wy = wind(px, py)
         inside = ((px >= xmin) & (px <= xmax) & (py >= ymin) & (py <= ymax)).astype(np.float32)
-        local = np.stack((wx / WIND_SCALE, wy / WIND_SCALE, inside)).astype(np.float32)
+        local = np.stack((wx / wind_scale, wy / wind_scale, inside)).astype(np.float32)
 
         out = {"vec": vec, "local": local}
         if self.use_global:
-            wmap, GX, GY = self._global_map(wind)
+            wmap, GX, GY = self._global_map(wind, wind_scale)
             s2 = 2.0 * self.blob_sigma ** 2
             ship = np.exp(-((GX - x) ** 2 + (GY - y) ** 2) / s2).astype(np.float32)
             goal = np.exp(-((GX - gx) ** 2 + (GY - gy) ** 2) / s2).astype(np.float32)
@@ -194,17 +212,40 @@ class WindStencilWrapper(gym.ObservationWrapper):
         base = self.env.unwrapped
         x, y, vx, vy = base.state
         gx, gy = base.goal
+        vel_scale, wind_scale = speed_scales(base.p)
         vec = np.array([(gx - x) / POS_SCALE, (gy - y) / POS_SCALE,
-                        vx / VEL_SCALE, vy / VEL_SCALE, x / POS_SCALE, y / POS_SCALE], dtype=np.float32)
+                        vx / vel_scale, vy / vel_scale, x / POS_SCALE, y / POS_SCALE], dtype=np.float32)
         wx, wy = base.wind(x + self._ox, y + self._oy)
-        return np.concatenate((vec, (wx / WIND_SCALE).ravel(), (wy / WIND_SCALE).ravel())).astype(np.float32)
+        return np.concatenate((vec, (wx / wind_scale).ravel(), (wy / wind_scale).ravel())).astype(np.float32)
+
+
+class ReferenceThrustWrapper(gym.ActionWrapper):
+    """
+    Exposes the reference ship's action space (|u_i| <= u_max of `ShipParams()`) on a ship
+    with a different thrust bound, scaling the action by u_max / u_max_ref. Policies are
+    trained on the reference ship, so this is what lets them command another ship: together
+    with the V*-normalised observation, a faster ship with the same windage ratio sees and
+    acts exactly as the reference ship in proportionally weaker wind.
+    """
+
+    def __init__(self, env):
+        super().__init__(env)
+        ref = ShipParams().u_max
+        self.factor = env.unwrapped.p.u_max / ref
+        self.action_space = spaces.Box(-ref, ref, shape=env.action_space.shape, dtype=env.action_space.dtype)
+
+    def action(self, action):
+        return np.asarray(action, dtype=np.float64) * self.factor
 
 
 def wrap_wind_obs(base_env, obs_cfg):
     """Apply the observation wrapper described by obs_cfg to a ShipEnv:
     {'stencil': n, 'spacing': s}  -> WindStencilWrapper (flat, for MlpPolicy)
-    otherwise WindObsWrapper(**cfg), plus FlattenObservation if cfg['flatten']."""
+    otherwise WindObsWrapper(**cfg), plus FlattenObservation if cfg['flatten'].
+    A ship whose thrust bound differs from the reference also gets ReferenceThrustWrapper."""
     cfg = dict(obs_cfg or {})
+    if base_env.unwrapped.p.u_max != ShipParams().u_max:
+        base_env = ReferenceThrustWrapper(base_env)
     if cfg.get("stencil"):
         return WindStencilWrapper(base_env, n=cfg["stencil"], spacing=cfg.get("spacing", 1.0))
     flatten = cfg.pop("flatten", False)

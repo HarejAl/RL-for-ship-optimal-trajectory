@@ -23,9 +23,30 @@ objective J = sum_k l(u_k).
 
 All functions only use arithmetic operators, so they work unchanged with
 Python floats, numpy arrays and torch tensors (batched or not).
+
+Ship scales
+-----------
+With V* = sqrt(u_max / c_w), L* = 1 / c_w and T* = L* / V*, the model becomes
+
+    v' = v / V*,  W' = W / V*,  u' = u / u_max,  t' = t / T*,  x' = x / L*
+    dv'/dt' = u' - |v'| v' - kappa |v' - W'| (v' - W'),   kappa = c_a / c_w
+
+so a ship is characterised by its calm-water speed V* and windage ratio kappa only
+(plus D / L*, the domain in inertia lengths). Two ships with the same kappa and L*
+are the SAME problem once the wind is divided by each ship's V*: a faster ship is
+exactly a ship in weaker wind. A different kappa is not a wind rescaling (c_a also
+damps the ship's own motion through still air).
 """
 
 from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ShipScales:
+    speed: float      # V*: calm-water top speed per axis, sqrt(u_max / c_w)
+    length: float     # L*: inertia length 1 / c_w (distance over which drag kills momentum)
+    time: float       # T* = L* / V*: response time
+    windage: float    # kappa = c_a / c_w
 
 
 @dataclass(frozen=True)
@@ -36,6 +57,13 @@ class ShipParams:
     u_max: float = 10.0       # per-axis thrust bound
     time_w: float = 1.0       # weight of travel time in the cost
     ctrl_w: float = 1e-2      # weight of control energy in the cost
+
+    def scales(self) -> ShipScales:
+        """Characteristic speed, length, time and windage ratio of this ship."""
+        speed = (self.u_max / self.cd_water) ** 0.5
+        length = 1.0 / self.cd_water
+        return ShipScales(speed=speed, length=length, time=length / speed,
+                          windage=self.cd_air / self.cd_water)
 
 
 def ship_accel(vx, vy, ux, uy, wx, wy, p: ShipParams):
