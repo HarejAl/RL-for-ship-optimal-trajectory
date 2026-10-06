@@ -8,3 +8,12 @@ data/
 output/anim/
 output/showcase/
 output/cache/
+
+# Talk / summit material: kept locally, not part of the research code
+summit/
+Claude outputs/
+*.pdf
+*.pptx
+*.mp4
+# sailing/ lives on the feature/sailing-agent branch
+sailing/

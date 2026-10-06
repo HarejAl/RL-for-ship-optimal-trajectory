@@ -7,6 +7,11 @@ optimality gap and on the computational effort they save.
 The long-term goal is a wind-aware agent that reads the wind map (direction and speed)
 and can therefore be applied to unseen and time-varying forecasts in a receding-horizon
 loop, amortising the cost of re-solving the routing problem each time the forecast updates.
+Real forecasts come from [Open-Meteo](https://open-meteo.com) (free, no API key) and drop into
+the same pipeline as the generated training fields.
+
+The sailing-boat routing playground (polar model, isochrone router, time-dependent DP) lives on
+the `feature/sailing-agent` branch.
 
 ---
 
@@ -15,7 +20,7 @@ loop, amortising the cost of re-solving the routing problem each time the foreca
 | File | Purpose |
 | --- | --- |
 | `dynamics.py` | Ship model and stage cost shared by the environment and the baseline. Works with numpy and torch. |
-| `wind.py` | `WindField` container (bilinear interpolation of the velocity components), legacy `WF.pkl` conversion, random wind-field generator, plotting helper. |
+| `wind.py` | `WindField` container (bilinear interpolation of the velocity components), Open-Meteo loaders (`from_openmeteo`, `from_openmeteo_sequence`), legacy `WF.pkl` conversion, random wind-field generator, plotting helper. |
 | `env.py` | Gymnasium environment `ShipEnv`. Seeded resets, start and goal sampled in the domain, cost `J` tracked in `info`. |
 | `dp_baseline.py` | `ValueIterationPlanner`: semi-Lagrangian value iteration on a 4D `(x, y, vx, vy)` grid, torch/GPU vectorised, greedy policy rollout in the environment. |
 | `run_dp_baseline.py` | Solve one case, print cost, time and solve statistics, save a figure to `output/`. |
@@ -23,6 +28,12 @@ loop, amortising the cost of re-solving the routing problem each time the foreca
 | `wind_obs.py` | Wind-aware observations: `WindObsWrapper` (state vector + ego-centric wind crop + coarse global map), `WindFieldPool`, `WindCNNExtractor` for SB3. |
 | `train_wind_aware.py` | Train TD3 or SAC with the CNN extractor on a pool of generated fields, validating on held-out fields. |
 | `compare_policy.py` | Plot DP and RL trajectories side by side on held-out cases. |
+| `dp_dataset.py` / `pretrain_bc.py` | DP-teacher dataset and behaviour cloning of the CNN actor (the route to `models/bc_t2`). |
+| `real_wind_demo.py` | Fetch one Open-Meteo field, plot it and solve the DP route on it. |
+| `receding_horizon_demo.py` | Evolving real forecast: the policy re-reads the live forecast each step vs. a plan made at departure. |
+| `staleness_study.py` / `recover_study.py` | Quantitative cost of sailing on a stale forecast over regions x departures x routes; rebuild the CSV from a log. |
+| `scenarios.py` / `showcase.py` / `evolving_scenario_demo.py` / `animate_compare.py` | Designed wind scenarios and presentation figures/animations. |
+| `viz.py` | Shared windy.com-style colour map, wind scale and particle animation. |
 | `preferences.py` | The cost-weight presets of the multi-objective study (`fast` / `balanced` / `eco`) and the helpers every script uses to agree on them. |
 | `dp_dataset_prefs.py` | One pass over the training fields producing one DP-teacher dataset per preference, on identical fields, goals, starts and random states. |
 | `merge_teacher_npz.py` | Concatenate the shards of parallel `dp_dataset_prefs.py` workers. |
@@ -30,8 +41,8 @@ loop, amortising the cost of re-solving the routing problem each time the foreca
 | `evolving_race.py` | Presentation animation: the three preference agents race across a drifting wind map, with plain-language fuel and time readouts. |
 | `race_gallery.py` | Sweep fields x routes for presentable races, store every rollout, score them, render the best and build a contact sheet. |
 | `tests/test_core.py` | Unit and sanity tests (interpolation, dynamics, environment, DP on zero wind and uniform wind). |
-| `legacy/` | The original single-field TD3 code (`env.py`, `main.py`). `trained_model.zip` was trained with this legacy environment and is **not** compatible with the new dynamics. |
-| `WF.pkl` | The original precomputed wind field (speed and direction). |
+| `WF.pkl` | The original precomputed wind field (speed and direction), kept as a fixed test case. |
+| `models/bc_t2.*` | The best wind-aware policy (DP-teacher behaviour clone), ready to evaluate. |
 
 ---
 
@@ -108,7 +119,7 @@ unseen fields.
 ```bash
 pip install -r requirements.txt
 python -m pytest tests -q
-python run_dp_baseline.py                           # legacy field, seeded start/goal
+python run_dp_baseline.py                           # WF.pkl field, seeded start/goal
 python run_dp_baseline.py --wind random --seed 7    # generated field
 python benchmark_dp.py --n-cases 20 --wind random   # many cases, CSV in output/
 python benchmark_dp.py --n-cases 20 --model path/to/model.zip   # add RL optimality gap
@@ -117,10 +128,31 @@ python benchmark_dp.py --n-cases 50 --model models/td3_v1_best/best_model.zip
 python compare_policy.py --model models/td3_v1_best/best_model.zip --seeds 0 1 2 3
 ```
 
-Trained models go to `models/` (git-ignored) with a `.json` sidecar describing the
-observation wrapper, and logs to `output/logs/<tag>/`.
+Trained models go to `models/` (git-ignored, except the best one `bc_t2`) with a `.json`
+sidecar describing the observation wrapper, and logs to `output/logs/<tag>/`.
 
-The legacy demo still runs with `python legacy/main.py`.
+---
+
+## Real wind: Open-Meteo
+
+`WindField.from_openmeteo(lat_range, lon_range, nx, ny, hour)` pulls the hourly 10 m wind from
+the free Open-Meteo forecast API (only `requests`, no key) and converts it into the model's
+units; `WindField.from_openmeteo_sequence(..., hours=[...])` returns successive forecast hours
+from one query, which is the time-varying input of the receding-horizon runs.
+
+The conversion is fixed, not per field, so a trained policy sees a consistent world at any zoom:
+the longer side of the lat/lon box maps to the 10-unit domain (`field.meta["km_per_unit"]`) and
+wind is divided by a fixed reference speed (15 m/s -> 10 units, `field.meta["ms_per_unit"]`).
+Pass `model="ecmwf_ifs025"` for a uniform 0.25 deg grid instead of Open-Meteo's location-blended
+best match. The free endpoint rate-limits bursts; the loaders retry with backoff, and the demos
+cache responses under `output/cache/`.
+
+```bash
+python real_wind_demo.py --solve                                   # one field + DP route
+python receding_horizon_demo.py --model models/bc_t2.zip           # policy on an evolving forecast
+python staleness_study.py --model models/bc_t2.zip                 # stale plan vs. live policy
+python evolving_race.py --scenario real --region bay_of_biscay --start 9.0 8.4 --goal 0.8 1.4
+```
 
 ---
 
@@ -464,5 +496,5 @@ the goal, see `output/compare_bc_v2_hard.png`); case 8 is a DP greedy-rollout fa
 1. Done: physically consistent dynamics, seeded environment, wind-field generator, DP baseline and benchmark harness.
 2. Done: wind-aware CNN policy via DP-teacher behaviour cloning (`bc_t2`: 83% success, median gap 3.5% on the current task; DAgger no longer needed with the 0.5 disc). Next: harder-case data (edge goals, stronger wind), a fast competitive planner as the speed reference, grid-refinement study of the DP teacher.
 3. Partly done: **separate** agents per cost weighting (`pref_fast`, `pref_balanced`, `pref_eco`), each behaviour-cloned from its own DP teacher — each wins its own objective, spanning 2.3x in arrival time against 3.0x in energy (see the multi-objective section). Outstanding: finish their teacher datasets (74 of 150 fields collected, which is what caps success at ~30%) and add the DP optimality gap per objective. Then the **preference-conditioned** policy: the cost-weight ratio as a network input, giving the whole fast-to-economical Pareto front from one network, with these three agents as the baseline to beat.
-4. Time-varying wind: receding-horizon execution where the field is swapped at each forecast step, compared with re-solved DP.
-5. Real forecast data (for example ERA5 10 m wind) and a 3-DOF ship model.
+4. Partly done: time-varying wind - the policy re-reads an evolving Open-Meteo forecast every step (`receding_horizon_demo.py`, `staleness_study.py`). Next: compare with DP re-solved at each forecast update.
+5. Partly done: real forecast data via Open-Meteo (`WindField.from_openmeteo*`). Next: ERA5 reanalysis for training on real weather, and a 3-DOF ship model.
