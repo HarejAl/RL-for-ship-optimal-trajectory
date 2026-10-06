@@ -38,8 +38,6 @@ the `feature/sailing-agent` branch.
 | `dp_dataset_prefs.py` | One pass over the training fields producing one DP-teacher dataset per preference, on identical fields, goals, starts and random states. |
 | `merge_teacher_npz.py` | Concatenate the shards of parallel `dp_dataset_prefs.py` workers. |
 | `compare_preferences.py` | Roll the preference agents out on shared held-out cases; success, time-energy Pareto, cross-cost matrix, figures. |
-| `evolving_race.py` | Presentation animation: the three preference agents race across a drifting wind map, with plain-language fuel and time readouts. |
-| `race_gallery.py` | Sweep fields x routes for presentable races, store every rollout, score them, render the best and build a contact sheet. |
 | `tests/test_core.py` | Unit and sanity tests (interpolation, dynamics, environment, DP on zero wind and uniform wind). |
 | `WF.pkl` | The original precomputed wind field (speed and direction), kept as a fixed test case. |
 | `models/bc_t2.*` | The best wind-aware policy (DP-teacher behaviour clone), ready to evaluate. |
@@ -151,7 +149,6 @@ cache responses under `output/cache/`.
 python real_wind_demo.py --solve                                   # one field + DP route
 python receding_horizon_demo.py --model models/bc_t2.zip           # policy on an evolving forecast
 python staleness_study.py --model models/bc_t2.zip                 # stale plan vs. live policy
-python evolving_race.py --scenario real --region bay_of_biscay --start 9.0 8.4 --goal 0.8 1.4
 ```
 
 ---
@@ -267,121 +264,6 @@ towards on-distribution rollout states (`--rollout-frac 0.5`) cut validation MSE
 0.13 but left success at 23%, and keeping the best-validation epoch (`--keep-best`) changed
 nothing. The relative comparison between the three agents is unaffected — they are trained,
 evaluated and scored on identical data budgets and identical cases.
-
-### Showing it to a non-technical audience
-
-`evolving_race.py` races the three agents across a wind map that drifts while they sail, with
-the jargon stripped out: the agents are labelled IN A HURRY / BALANCED / FUEL SAVER, the
-readouts are hours at sea and a fuel bar scaled to the thirstiest agent, and the wind scale runs
-the wind banded into six
-plain shades of grey-blue.
-
-```bash
-python evolving_race.py
-```
-
-On the default case (generated field 31 drifting 6 units east and 3 north, corner to corner,
-10.8 of the 12 map units apart) the three agents tell the story without a caption: the hurried
-one arrives in 11.6 h having burned all of its fuel budget, the balanced one 4 h later on
-half, and the fuel saver dives south, picks up a favourable flank and arrives at 24.3 h on a
-quarter. The routes are visibly different, which is the point - it is not three speeds along
-one line.
-
-Five demos, one script. Each writes three things: `_figure.png` (one map, the finished routes,
-the numbers - the still a slide or a paper wants), `_panels.png` (four stages across the voyage)
-and a `.gif`.
-
-```bash
-python evolving_race.py --scenario fixed --field-seed 31 --prefs balanced --tag _solo
-python evolving_race.py --scenario fixed --field-seed 31
-python evolving_race.py --scenario drift --field-seed 31 --prefs balanced --tag _solo
-python evolving_race.py --scenario drift --field-seed 31
-python evolving_race.py --scenario real --region bay_of_biscay --start 9.0 8.4 --goal 0.8 1.4
-```
-
-(the four above take `--start 0.8 1.4 --goal 9.0 8.4 --max-steps 450`)
-
-| output | map | agents | result |
-| --- | --- | --- | --- |
-| `race_fixed_solo` | one generated field, unchanging | one | the base problem: 24.0 h, 306 fuel |
-| `race_fixed` | the same field | three | 10.7 / 14.3 / 24.0 h, fuel 100 / 54 / 22% |
-| `race_drift_solo` | the same field, drifting | one | the map moves under a single route |
-| `race_drift` | the same field, drifting | three | 11.6 / 15.7 / 24.3 h, fuel 100 / 49 / 24% |
-| `race_real` | Open-Meteo, Bay of Biscay | three | 17.9 / 32.3 / 40.9 h, fuel 100 / 37 / **10%** |
-
-All five share field 31 (bar the forecast) and the same corner-to-corner route on purpose, so
-they can be shown in sequence: one agent on a map that holds still, then the same agent when the
-map will not, then what three different instructions do to it, then the same thing on a real
-forecast. A lone agent is drawn in the sailing demos' own agent cyan (`#00e5ff`).
-
-`real` pulls hourly Open-Meteo 10 m wind (no API key, cached under `output/cache`) and runs it on
-**the forecast's own clock**: the field metadata gives 62 km per model length unit and 2.5 (m/s)
-per model speed unit, so one model time unit is 6.9 real hours and the weather advances exactly
-as fast as the forecast says. The 500 km crossing takes the hurried agent 17.9 h and the thrifty
-one 40.9 h on a tenth of the fuel. Two caveats: real forecast fields are much weaker than the
-generated training fields (this window peaks at 12.9 m/s against the generator's 25), so the
-colour scale is auto-fitted to each window or the map renders blank; and on most real routes the
-`fast` agent simply times out - of 15 region-route combinations only three had all three agents
-arriving.
-
-The animations play at `--fps` x `--stride` simulation steps per second: 12 x 1 by default, so
-every step is drawn and a crossing takes 11-17 seconds. (It used to be 20 x 2, which was three
-times faster and skipped every other step.) `--hold-s` keeps the finished picture on screen at
-the end.
-
-Two looks. `--style sailing` (the default) is the house style of this repo, identical to the
-sailing demos: the windy.com speed palette on the same dark ground (`#04121f`), white quivers,
-and a drifting particle flow in the animations, so a talk can cut between the ship and the
-sailboat work without the audience re-learning the picture. The clutter is still gone - no
-lettering on the map, no agent subtitles - the colour is the wind and nothing else.
-`--style simple` is the ink-saving alternative: one hue banded into six flat steps on white.
-
-Both styles band the speed into flat steps rather than a smooth ramp - six for `simple`, sixteen
-for `sailing`, which still reads as a continuous weather map. That is a file-size decision as
-much as a visual one. A smooth gradient dithers into hundreds of near-identical shades, and with
-every step drawn the wind map is repainted constantly: the colour animations came out at 17 MB
-banded at 16 steps they are 3-5 MB, and the light style drops from 14 MB to about 2. Requantising
-to a shared palette afterwards helps the banded maps (`--gif-colors`, on by default) but ruined
-the smooth ones - at 64 colours the background crowded out the tracks and two agents came out the
-same colour.
-
-The weather is a generated field sliding across the domain rather than one of the synthetic set
-pieces in `evolving_scenario_demo.py`. Those are deliberately stronger than anything the wind
-generator produces (cyclones at strength 11, deepening gale fronts), which makes them good
-stress tests and bad demos: the clones are far outside their training distribution there and
-simply thrash - measured, all three time out or wander on every set piece tried. Drifting a
-generated field keeps magnitudes and correlation lengths exactly those of training, so the
-weather moves without leaving the distribution.
-
-Because these clones only arrive on about a third of crossings, a presentable race has to be
-found rather than assumed. `race_gallery.py` does the finding:
-
-```bash
-python race_gallery.py --seeds 1 80 --top 8
-```
-
-It races the three agents through every combination of generated field and named route, scores
-each case on what makes the animation worth watching - all three arrive, in the expected order,
-by visibly different paths, across lively weather, with a big fuel ratio - then renders the best
-and lays them out in `output/race_gallery_contact.png` to choose from. The sweep runs at about
-2 s per case on CPU; 400 cases take a quarter of an hour.
-
-Measured over 80 fields x 5 routes: **76 of 400 cases have all three agents arriving and 39 are
-fully ordered**, which is the success rate of the clones showing through. Say so if anyone asks
-what a typical crossing looks like.
-
-EVERY case is stored in `output/race_runs/<name>.npz` - trajectories, thrusts, fuel curves,
-outcomes, and the case configuration - whether it scored well or not, and indexed with its
-metrics in `output/race_gallery.csv`. Figures can therefore be remade without re-simulating:
-
-```python
-from evolving_race import load_runs, drifting_weather
-runs, prefs, meta = load_runs("output/race_runs/s48_ne.npz")
-field = drifting_weather(1.0, seed=meta["field_seed"], drift=tuple(meta["drift"]))
-```
-
-That is how the contact sheet is drawn, and it is the cheap way to try a different visual
-treatment on cases that are already known to work.
 
 Still to run (needs the GPU): the remaining 76 fields of the teacher datasets, and
 `compare_preferences.py` without `--no-dp`, which adds the DP optimum for each objective and
