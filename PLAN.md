@@ -56,13 +56,13 @@ equivariance for free data efficiency) and an extra |W|^2 channel (wind force is
 ### A. Scaling
 - [x] **A1** `ShipParams.scales()`, V*-normalised observation, `ReferenceThrustWrapper`,
       `tests/test_scaling.py` (faster ship == weaker wind, exact). Commit `9125673`.
-- [~] **A2** Ship catalogue with dimensional properties (container ship, bulk carrier, car
+- [x] **A2** Ship catalogue with dimensional properties (container ship, bulk carrier, car
       carrier, motor yacht) -> `(V*, L*, kappa)`; nondimensional wind field; comparison figure:
       same wind map, same straight-to-goal strategy, different ships -> track, speed, thrust,
       hull drag, wind drag, time, energy. Script `ship_scales_demo.py`.
 
 ### B. Pure RL on the GPU
-- [~] **B1** `gpu_env.py`: batched torch environment. Thousands of ships, each with its own
+- [x] **B1** `gpu_env.py`: batched torch environment. Thousands of ships, each with its own
       generated field (bank refreshed during training, never the held-out seeds), its own kappa
       and wind strength, start and goal. Check: observation identical to
       `WindObsWrapper(add_kappa=True)` and one step identical to `ShipEnv` (unit test).
@@ -93,3 +93,6 @@ equivariance for free data efficiency) and an extra |W|^2 channel (wind force is
 | date | step | what | hardware / time | result |
 | --- | --- | --- | --- | --- |
 | 2026-10-06 | A1 | scaling tests | CPU, 10 s | 7/7 pass; `bc_t2` on 2x faster ship in 2x wind follows the reference route within 1e-3 |
+| 2026-10-06 | A2 | `ship_scales_demo.py`, 100 km box, W_ref 25 m/s, full thrust at the goal | CPU, 5 s | container ship kappa 0.065 A 0.28: +8% time, 1.9 km drift; bulk carrier kappa 0.024 A 0.30: +7%, 1.6 km; car carrier kappa 0.19 A 1.18: +15%, 7.3 km; yacht kappa 0.09 A 1.56: +10%, 10.8 km. Exact collapse (2x thrust, sqrt2 wind): same track, time ratio 1.414. RL toy ship: kappa 0.5, A 2.5, L* 20 km at this scale (D/L* = 6 vs 10-735 for real ships) |
+| 2026-10-06 | B1 | GPU env vs CPU env | RTX 4070S, 14 s | 3/3 pass: observations to 1e-5, 40-step trajectories and cost identical |
+| 2026-10-06 | B2 | PPO smoke run, 2048 envs x 64 steps, 12 iterations (1.6M steps) | RTX 4070S **shared with another job at 100% GPU and ~11 GB**: ~2-3k steps/s (update 35-60 s/iter, memory spilled to system RAM) | train success 6% -> 86% (curriculum radius 1.0 -> 0.74); held-out success at the final 0.5 radius 6% -> 45%. Learns fast; throughput is entirely limited by the shared GPU |
