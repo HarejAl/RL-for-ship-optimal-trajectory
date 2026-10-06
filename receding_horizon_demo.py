@@ -38,7 +38,7 @@ from wind import WindField
 from dp_baseline import ValueIterationPlanner
 from benchmark_dp import load_model
 from wind_obs import wrap_wind_obs
-from viz import windy_cmap, windy_norm, wind_scale_ticks
+from viz import windy_cmap, windy_norm, wind_scale_ticks, WindParticles
 
 # Anchor all paths to this script's location
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -306,14 +306,17 @@ def refresh_sweep(policy, start, goal, evolving, params, goal_radius, args, ref_
     print(f"saved {out}")
 
 
-def _draw_field(ax, field, quiver_step=2, ms_per_unit=1.0):
+def _draw_field(ax, field, quiver_step=2, ms_per_unit=1.0, animated=True):
     norm = windy_norm(ms_per_unit)
     im = ax.pcolormesh(field.x, field.y, field.speed.T, shading="gouraud",
                        cmap=windy_cmap(), norm=norm)
-    X, Y = np.meshgrid(field.x, field.y, indexing="ij")
-    s = quiver_step
-    q = ax.quiver(X[::s, ::s], Y[::s, ::s], field.wx[::s, ::s], field.wy[::s, ::s],
-                  color="white", scale=150, width=0.003, alpha=0.85)
+    if not animated:                          # a still frame: particles need motion, arrows do not
+        X, Y = np.meshgrid(field.x, field.y, indexing="ij")
+        s = quiver_step
+        q = ax.quiver(X[::s, ::s], Y[::s, ::s], field.wx[::s, ::s], field.wy[::s, ::s],
+                      color="white", scale=150, width=0.003, alpha=0.85)
+        return im, q
+    q = WindParticles(ax, field.extent)      # windy.com-style flow, same as the sailing demos
     return im, q
 
 
@@ -366,7 +369,7 @@ def make_animation(evolving, start, goal, goal_radius, frozen, adaptive, params,
         t_shown = float(at[min(i, len(at) - 1)]) if at is not None and len(at) else t_model
         field = evolving.at(t_shown)
         im.set_array(field.speed.T.ravel())
-        q.set_UVC(field.wx[::2, ::2], field.wy[::2, ::2])
+        q.step(field)
         out = []
         for res, line, dot, Jc in ((frozen, l_f, d_f, Jf), (adaptive, l_a, d_a, Ja)):
             j = min(i, len(res["traj"]) - 1)
@@ -398,7 +401,8 @@ def make_summary(evolving, start, goal, goal_radius, frozen, adaptive, as_intend
     for pi, (ax, i) in enumerate(zip(axes, picks)):
         t_model = i * p.dt
         field = evolving.at(t_model)
-        im, _ = _draw_field(ax, field, quiver_step=2, ms_per_unit=evolving.meta.get("ms_per_unit", 1.0))
+        im, _ = _draw_field(ax, field, quiver_step=2, ms_per_unit=evolving.meta.get("ms_per_unit", 1.0),
+                            animated=False)
         if pi == 0:  # what the departure plan expected to do, had the weather held
             ax.plot(as_intended["traj"][:, 0], as_intended["traj"][:, 1], color="white", lw=1.6,
                     ls=(0, (4, 3)), alpha=0.95, label="plan as intended (if weather held)")

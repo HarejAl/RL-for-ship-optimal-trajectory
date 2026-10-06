@@ -33,7 +33,7 @@ from benchmark_dp import load_model
 from wind_obs import wrap_wind_obs
 from receding_horizon_demo import EvolvingWind, simulate
 from scenarios import _grid, _background, _vortex, _jet
-from viz import windy_cmap, windy_norm, wind_scale_ticks
+from viz import windy_cmap, windy_norm, wind_scale_ticks, WindParticles
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, "output")
@@ -233,12 +233,15 @@ def main():
     panels(evolving, start, goal, run, plan, params, args)
 
 
-def _paint(ax, field, ms_per_unit, step=5):
+def _paint(ax, field, ms_per_unit, step=5, animated=True):
     im = ax.pcolormesh(field.x, field.y, field.speed.T, shading="gouraud",
                        cmap=windy_cmap(), norm=windy_norm(ms_per_unit))
-    X, Y = np.meshgrid(field.x, field.y, indexing="ij")
-    q = ax.quiver(X[::step, ::step], Y[::step, ::step], field.wx[::step, ::step],
-                  field.wy[::step, ::step], color="white", scale=170, width=0.0028, alpha=0.85)
+    if not animated:                          # a still frame: particles need motion, arrows do not
+        X, Y = np.meshgrid(field.x, field.y, indexing="ij")
+        q = ax.quiver(X[::step, ::step], Y[::step, ::step], field.wx[::step, ::step],
+                      field.wy[::step, ::step], color="white", scale=170, width=0.0028, alpha=0.85)
+        return im, q
+    q = WindParticles(ax, field.extent)      # windy.com-style flow, same as the sailing demos
     return im, q
 
 
@@ -291,7 +294,7 @@ def animate(evolving, start, goal, goal_radius, run, plan, params, args):
         t_shown = float(at[min(i, len(at) - 1)])   # the map the agent is holding
         field = evolving.at(t_shown)
         im.set_array(field.speed.T.ravel())
-        q.set_UVC(field.wx[::5, ::5], field.wy[::5, ::5])
+        q.step(field)
         pairs = [(run, l_run, d_run)] + ([(plan, l_plan, d_plan)] if show_plan else [])
         for res, line, dot in pairs:
             j = min(i, len(res["traj"]) - 1)
@@ -315,7 +318,7 @@ def panels(evolving, start, goal, run, plan, params, args):
     fig, axes = plt.subplots(1, 4, figsize=(20, 5.4), facecolor="#04121f")
     for ax, i in zip(axes, picks):
         t_model = i * params.dt
-        im, _ = _paint(ax, evolving.at(t_model), args.ms_per_unit, step=6)
+        im, _ = _paint(ax, evolving.at(t_model), args.ms_per_unit, step=6, animated=False)
         ax.set_facecolor("#04121f")
         for res, c, ls, lw in pairs:
             j = min(i, len(res["traj"]) - 1)

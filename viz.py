@@ -54,3 +54,50 @@ def wind_scale_ticks(ms_per_unit=1.0, max_ms=WINDY_MAX_MS, step=5.0):
     """Colorbar tick positions (in field units) and labels (in m/s)."""
     speeds = np.arange(0.0, max_ms + 1e-9, step)
     return speeds / max(ms_per_unit, 1e-9), [f"{s:.0f}" for s in speeds]
+
+
+class WindParticles:
+    """windy.com-style wind animation: a dense carpet of short, fine, faint strokes.
+
+    Windy draws thousands of *short* streaks rather than long comet tails: each stroke covers a
+    few frames of motion, is thin and semi-transparent, and particles are recycled constantly so
+    the pattern keeps flowing. Shared by every animation in this repo, so the audience sees the
+    same familiar picture each time.
+
+        parts = WindParticles(ax, extent)
+        parts.step(field)          # once per frame, with the wind field of that moment
+    """
+
+    def __init__(self, ax, extent, n=2600, tail=5, speed=0.30, lw=0.9, alpha=0.45, life=70,
+                 colour="white", seed=3, zorder=1):
+        from matplotlib.collections import LineCollection
+        self.extent = tuple(float(v) for v in extent)
+        self.n, self.tail, self.speed, self.life = int(n), int(tail), float(speed), int(life)
+        self.rng = np.random.default_rng(seed)
+        self.pts = self._spawn(self.n)
+        self.age = self.rng.integers(0, self.life, self.n)
+        self.hist = np.repeat(self.pts[None, :, :], self.tail, axis=0)     # (tail, n, 2)
+        self.col = LineCollection([], colors=colour, linewidths=lw, alpha=alpha, zorder=zorder,
+                                  capstyle="round")
+        ax.add_collection(self.col)
+
+    def _spawn(self, n):
+        x0, x1, y0, y1 = self.extent
+        return np.column_stack([self.rng.uniform(x0, x1, n), self.rng.uniform(y0, y1, n)])
+
+    def step(self, field, dt=1.0):
+        wx, wy = field(self.pts[:, 0], self.pts[:, 1])
+        self.pts = self.pts + np.column_stack([wx, wy]) * self.speed * dt * 0.01
+        self.age += 1
+        x0, x1, y0, y1 = self.extent
+        gone = ((self.pts[:, 0] < x0) | (self.pts[:, 0] > x1) | (self.pts[:, 1] < y0) |
+                (self.pts[:, 1] > y1) | (self.age > self.life))
+        if gone.any():
+            idx = np.nonzero(gone)[0]
+            self.pts[idx] = self._spawn(len(idx))
+            self.age[idx] = 0
+            self.hist[:, idx, :] = self.pts[idx]        # no streak across the respawn jump
+        self.hist = np.roll(self.hist, -1, axis=0)
+        self.hist[-1] = self.pts
+        self.col.set_segments(np.transpose(self.hist, (1, 0, 2)))
+        return self.col
