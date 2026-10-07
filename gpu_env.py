@@ -16,6 +16,13 @@ plus `oob_penalty` when the ship leaves the map. Arrival is a termination with n
 the agent is paid for reaching the goal only by ending its running cost early.
 
 Actions are normalised to [-1, 1] per axis and scaled by u_max inside the environment.
+
+Two ways to handle ships of different windage ratio kappa:
+  * add_kappa=True : kappa is a policy input (7th entry of `vec`);
+  * kappa_ref=k    : parameter-free. The policy is shown the wind scaled by sqrt(kappa / k)
+                     (as `wind_obs.PerceivedWindWrapper`): a ship more prone to being pushed
+                     sees a stronger map. With kappa fixed at k during training this is a plain
+                     single-ship policy; the scaling is what deploys it on other ships.
 """
 
 import numpy as np
@@ -106,7 +113,7 @@ class BatchShipEnv:
     def __init__(self, n_envs, bank, params=None, kappa_range=(0.05, 0.6), wind_mult_range=(0.25, 1.0),
                  spawn_box=(0.0, 10.0), goal_radius=0.5, min_start_goal_dist=4.0, max_steps=600,
                  local_size=2.0, local_res=16, global_res=16, blob_sigma=0.6, gamma=0.995,
-                 oob_penalty=20.0, seed=0):
+                 oob_penalty=20.0, add_kappa=False, kappa_ref=None, seed=0):
         self.n = int(n_envs)
         self.bank = bank
         self.dev = bank.device
@@ -130,8 +137,12 @@ class BatchShipEnv:
         ox, oy = torch.meshgrid(off, off, indexing="ij")
         self.ox = ox.to(self.dev, torch.float32)
         self.oy = oy.to(self.dev, torch.float32)
+        self.add_kappa = bool(add_kappa)
+        self.kappa_ref = None if kappa_ref is None else float(kappa_ref)
         self.cfg = dict(local_size=float(local_size), local_res=int(local_res), global_res=int(global_res),
-                        use_global=True, blob_sigma=float(blob_sigma), add_kappa=True)
+                        use_global=True, blob_sigma=float(blob_sigma), add_kappa=self.add_kappa)
+        if self.kappa_ref is not None:
+            self.cfg["kappa_ref"] = self.kappa_ref     # wrap_wind_obs inserts PerceivedWindWrapper
         self.gen = torch.Generator(device=self.dev)
         self.gen.manual_seed(int(seed))
 
@@ -192,18 +203,21 @@ class BatchShipEnv:
     def obs(self):
         x, y = self.pos[:, 0], self.pos[:, 1]
         gx, gy = self.goal[:, 0], self.goal[:, 1]
-        vec = torch.stack([(gx - x) / POS_SCALE, (gy - y) / POS_SCALE,
-                           self.vel[:, 0] / VEL_SCALE, self.vel[:, 1] / VEL_SCALE,
-                           x / POS_SCALE, y / POS_SCALE,
-                           (self.cd_air / self.p.cd_water) / KAPPA_SCALE], dim=1)
+        kappa = self.cd_air / self.p.cd_water
+        cols = [(gx - x) / POS_SCALE, (gy - y) / POS_SCALE, self.vel[:, 0] / VEL_SCALE,
+                self.vel[:, 1] / VEL_SCALE, x / POS_SCALE, y / POS_SCALE]
+        if self.add_kappa:
+            cols.append(kappa / KAPPA_SCALE)
+        vec = torch.stack(cols, dim=1)
+        seen = self.mult if self.kappa_ref is None else self.mult * torch.sqrt(kappa / self.kappa_ref)
         px = x[:, None, None] + self.ox
         py = y[:, None, None] + self.oy
-        wx, wy = self.wind_at(px, py)
+        wx, wy = self.wind_at(px, py, mult=seen)
         xmin, xmax, ymin, ymax = self.bank.extent
         inside = ((px >= xmin) & (px <= xmax) & (py >= ymin) & (py <= ymax)).float()
         local = torch.stack([wx / WIND_SCALE, wy / WIND_SCALE, inside], dim=1)
         GX, GY = self.bank.GX, self.bank.GY
-        wmap = self.bank.gmap[self.fidx] * (self.mult / WIND_SCALE).view(-1, 1, 1, 1)
+        wmap = self.bank.gmap[self.fidx] * (seen / WIND_SCALE).view(-1, 1, 1, 1)
         ship = torch.exp(-((GX - x.view(-1, 1, 1)) ** 2 + (GY - y.view(-1, 1, 1)) ** 2) / self.blob_s2)
         goal = torch.exp(-((GX - gx.view(-1, 1, 1)) ** 2 + (GY - gy.view(-1, 1, 1)) ** 2) / self.blob_s2)
         glob = torch.cat([wmap, ship[:, None], goal[:, None]], dim=1)

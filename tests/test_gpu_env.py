@@ -1,4 +1,5 @@
-"""The batched GPU environment reproduces ShipEnv + WindObsWrapper(add_kappa=True) exactly."""
+"""The batched GPU environment reproduces ShipEnv + WindObsWrapper exactly, in both windage
+modes: kappa as a policy input, and the parameter-free perceived wind (PerceivedWindWrapper)."""
 
 import os
 import sys
@@ -14,7 +15,7 @@ sys.path.insert(0, os.path.join(SCRIPT_DIR, ".."))
 from dynamics import ShipParams  # noqa: E402
 from env import ShipEnv  # noqa: E402
 from wind import WindField, generate_wind_field  # noqa: E402
-from wind_obs import WindObsWrapper  # noqa: E402
+from wind_obs import WindObsWrapper, PerceivedWindWrapper  # noqa: E402
 from gpu_env import FieldBank, BatchShipEnv  # noqa: E402
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -25,36 +26,44 @@ START = [(1.0, 2.0), (8.0, 1.5), (5.0, 9.0)]
 GOAL = [(8.0, 8.0), (2.0, 7.0), (5.0, 1.0)]
 
 
-def cpu_envs():
+MODES = [dict(add_kappa=True), dict(kappa_ref=0.5)]
+
+
+def cpu_envs(mode):
     out = []
     for s, k, m, st, g in zip(SEEDS, KAPPA, MULT, START, GOAL):
         f = generate_wind_field(s)
         f = WindField(f.x, f.y, m * f.wx, m * f.wy)
-        e = WindObsWrapper(ShipEnv(f, params=ShipParams(cd_air=k * 0.5)), add_kappa=True)
+        base = ShipEnv(f, params=ShipParams(cd_air=k * 0.5))
+        if "kappa_ref" in mode:
+            base = PerceivedWindWrapper(base, mode["kappa_ref"])
+        e = WindObsWrapper(base, add_kappa=mode.get("add_kappa", False))
         e.reset(seed=0, options=dict(start=st, goal=g))
         out.append(e)
     return out
 
 
-def gpu_env():
+def gpu_env(mode):
     bank = FieldBank(0, DEVICE, fields=[generate_wind_field(s) for s in SEEDS])
-    env = BatchShipEnv(len(SEEDS), bank)
+    env = BatchShipEnv(len(SEEDS), bank, **mode)
     env.set_cases(range(len(SEEDS)), START, GOAL, KAPPA, MULT)
     return env
 
 
-def test_observation_matches_cpu():
-    env = gpu_env()
+@pytest.mark.parametrize("mode", MODES)
+def test_observation_matches_cpu(mode):
+    env = gpu_env(mode)
     obs = {k: v.cpu().numpy() for k, v in env.obs().items()}
-    for n, e in enumerate(cpu_envs()):
+    for n, e in enumerate(cpu_envs(mode)):
         ref = e.observation(None)
         for k in ref:
             assert np.allclose(obs[k][n], ref[k], atol=1e-5), (n, k)
 
 
-def test_trajectory_matches_cpu():
-    env = gpu_env()
-    cpus = cpu_envs()
+@pytest.mark.parametrize("mode", MODES)
+def test_trajectory_matches_cpu(mode):
+    env = gpu_env(mode)
+    cpus = cpu_envs(mode)
     rng = np.random.default_rng(0)
     for _ in range(40):
         a = rng.uniform(-1, 1, (len(SEEDS), 2)).astype(np.float32)

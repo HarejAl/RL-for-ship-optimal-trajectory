@@ -2,7 +2,7 @@
 Actor-critic network of the pure-RL agent (PLAN.md step B2), and a `.predict` adapter so a
 trained checkpoint plugs into the CPU tools (`benchmark_dp.py`, `compare_policy.py`).
 
-Observation = `WindObsWrapper(add_kappa=True)`: vec (7,), local (3, K, K), global (4, G, G).
+Observation = `WindObsWrapper`: vec (6,) or (7,) with kappa, local (3, K, K), global (4, G, G).
 Actor and critic have separate encoders (same layout as `WindCNNExtractor`), so the value
 regression cannot disturb the policy features. Actions are normalised to [-1, 1] per axis.
 """

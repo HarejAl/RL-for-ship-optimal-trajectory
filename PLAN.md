@@ -61,12 +61,15 @@ equivariance for free data efficiency) and an extra |W|^2 channel (wind force is
       same wind map, same straight-to-goal strategy, different ships -> track, speed, thrust,
       hull drag, wind drag, time, energy. Script `ship_scales_demo.py`.
 
-- [~] **A3** Windage by perception instead of a kappa input (Alex's proposal): train on ONE
+- [x] **A3** Windage by perception instead of a kappa input (Alex's proposal): train on ONE
       kappa_ref and at deployment show the policy `W_eff = sqrt(kappa / kappa_ref) * W`
       (`wind_obs.PerceivedWindWrapper`): a ship more prone to being pushed sees a stronger map.
       Exact for the wind force on a ship at rest; approximate when moving (c_a also drags on the
       ship's own motion). Measured with `kappa_perception_study.py` (DP on the true ship as the
-      optimum). Later ablation: kappa-input PPO vs fixed-kappa PPO + perceived wind.
+      optimum). **ADOPTED 2026-10-07**: the policy is parameter-free (no kappa input); it is
+      trained at kappa_ref = 0.5 with wind strength down to 0.15x so that every real ship
+      (kappa >= 0.05 -> perceived factor >= 0.32) interpolates. Later ablation: kappa-input PPO
+      (`train_ppo.py --kappa-input 0.05 0.6`) vs this.
 
 ### B. Pure RL on the GPU
 - [x] **B1** `gpu_env.py`: batched torch environment. Thousands of ships, each with its own
@@ -75,7 +78,8 @@ equivariance for free data efficiency) and an extra |W|^2 channel (wind force is
       `WindObsWrapper(add_kappa=True)` and one step identical to `ShipEnv` (unit test).
 - [~] **B2** `train_ppo.py`: PPO on the GPU, separate actor and critic CNNs.
       Reward `-stage_cost + gamma*Phi(s') - Phi(s)`, `Phi = -dist / V*`, out-of-bounds penalty.
-      Domain randomisation: kappa in [0.05, 0.6], wind multiplier in [0.25, 1.0].
+      Parameter-free: fixed kappa_ref = 0.5, perceived wind for other ships (step A3), wind
+      multiplier in [0.15, 1.0]. Validation reports success per ship kappa (0.05/0.1/0.25/0.5).
       Smoke run, measure steps/s.
 - [ ] **B3** Long run (overnight). Log curves in `output/logs/<tag>/`.
 - [ ] **B4** Evaluate against DP and `bc_t2` on the standard held-out cases
@@ -104,3 +108,4 @@ equivariance for free data efficiency) and an extra |W|^2 channel (wind force is
 | 2026-10-06 | B1 | GPU env vs CPU env | RTX 4070S, 14 s | 3/3 pass: observations to 1e-5, 40-step trajectories and cost identical |
 | 2026-10-06 | B2 | PPO smoke run, 2048 envs x 64 steps, 12 iterations (1.6M steps) | RTX 4070S **shared with another job at 100% GPU and ~11 GB**: ~2-3k steps/s (update 35-60 s/iter, memory spilled to system RAM) | train success 6% -> 86% (curriculum radius 1.0 -> 0.74); held-out success at the final 0.5 radius 6% -> 45%. Learns fast; throughput is entirely limited by the shared GPU |
 | 2026-10-07 | A3 | `kappa_route_demo.py`: `bc_t2` (kappa_ref 0.5) on ships kappa 0.05-0.6, perceived vs raw wind, 200 held-out cases, no DP | CPU (shared), ~15 min | **Theory confirmed.** Perceived: route deviation grows monotonically with kappa (0.35 -> 0.45 -> 0.80 -> 1.09 -> 1.19); raw stays ~1.0 at every kappa (the agent detours as if it were a kappa 0.5 ship). Low-windage ships gain the most: kappa 0.05 success 100% vs 88%, voyage time 2.24 vs 2.54 (-12%), cost J 3.07 vs 3.59 (-14%). Above kappa_ref (0.6) perceived is slightly worse on success (70% vs 76%): extrapolating beyond the training wind. Optimality vs DP: pending (`kappa_perception_study.py`) |
+| 2026-10-07 | A3 | `kappa_perception_study.py`: `bc_t2` vs DP solved on the TRUE ship, 30 held-out cases x 4 kappa | CPU (shared), ~90 min | DP 100% everywhere. Raw wind: success 83-87%, median gap +6.7% (kappa 0.05), +6.1% (0.1), +3.5% (0.25, 0.5). **Perceived wind: 100% / -0.3% (kappa 0.05), 97% / +0.6% (0.1), 93% / +1.2% (0.25), 83% / +3.5% (0.5).** The parameter-free mapping is near-optimal for low-windage (real) ships, better than the agent on its own training ship. Decision: drop the kappa input |

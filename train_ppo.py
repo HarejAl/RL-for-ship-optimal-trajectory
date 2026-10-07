@@ -50,8 +50,13 @@ def parse_args():
     ap.add_argument("--n-fields", type=int, default=4096, help="fields resident in the GPU bank")
     ap.add_argument("--refresh-every", type=int, default=10, help="iterations between bank refreshes")
     ap.add_argument("--refresh-n", type=int, default=128, help="fields regenerated per refresh")
-    ap.add_argument("--kappa", type=float, nargs=2, default=[0.05, 0.6])
-    ap.add_argument("--wind-mult", type=float, nargs=2, default=[0.25, 1.0])
+    ap.add_argument("--kappa-ref", type=float, default=0.5,
+                    help="parameter-free policy: train on this windage ratio, deploy on other ships "
+                         "through the perceived wind sqrt(kappa / kappa_ref) * W")
+    ap.add_argument("--kappa-input", type=float, nargs=2, default=None, metavar=("LO", "HI"),
+                    help="instead: randomise kappa in [LO, HI] and feed it to the policy")
+    ap.add_argument("--wind-mult", type=float, nargs=2, default=[0.15, 1.0],
+                    help="wind strength range; its low end must cover sqrt(kappa_min / kappa_ref)")
     ap.add_argument("--radius-start", type=float, default=1.0, help="goal-radius curriculum start")
     ap.add_argument("--radius-final", type=float, default=0.5)
     ap.add_argument("--radius-success", type=float, default=0.7, help="shrink when success rate exceeds")
@@ -64,13 +69,21 @@ def parse_args():
     return ap.parse_args()
 
 
+def kappa_range(args):
+    return tuple(args.kappa_input) if args.kappa_input else (args.kappa_ref, args.kappa_ref)
+
+
+def obs_mode(args):
+    return dict(add_kappa=True) if args.kappa_input else dict(kappa_ref=args.kappa_ref)
+
+
 def make_eval(args, device):
     """Fixed validation cases on held-out fields (EVAL_SEED_BASE, never trained on)."""
     rng = np.random.default_rng(12345)
     n = args.eval_n
     n_fields = 64
     bank = FieldBank(n_fields, device, seed_start=EVAL_SEED_BASE)
-    env = BatchShipEnv(n, bank, max_steps=600, gamma=args.gamma, seed=1)
+    env = BatchShipEnv(n, bank, max_steps=600, gamma=args.gamma, seed=1, **obs_mode(args))
     starts, goals = [], []
     while len(starts) < n:
         s, g = rng.uniform(0, 10, 2), rng.uniform(0, 10, 2)
@@ -78,8 +91,8 @@ def make_eval(args, device):
             starts.append(s)
             goals.append(g)
     case = dict(fidx=np.arange(n) % n_fields, start=np.array(starts), goal=np.array(goals),
-                kappa=np.tile([0.1, 0.3, 0.5, 0.6], n // 4 + 1)[:n],
-                mult=np.tile([1.0, 1.0, 0.6, 0.3], n // 4 + 1)[:n])
+                kappa=np.tile([0.05, 0.1, 0.25, 0.5], n // 4 + 1)[:n],     # ships of every windage
+                mult=np.tile([1.0, 1.0, 1.0, 1.0, 0.6, 0.6, 0.6, 0.6], n // 8 + 1)[:n])
     return env, case
 
 
@@ -124,13 +137,13 @@ def main():
 
     t0 = time.time()
     bank = FieldBank(args.n_fields, dev)
-    env = BatchShipEnv(args.n_envs, bank, kappa_range=args.kappa, wind_mult_range=args.wind_mult,
-                       gamma=args.gamma, seed=args.seed)
+    env = BatchShipEnv(args.n_envs, bank, kappa_range=kappa_range(args), wind_mult_range=args.wind_mult,
+                       gamma=args.gamma, seed=args.seed, **obs_mode(args))
     env.radius = args.radius_start
     eval_env, eval_case = make_eval(args, dev)
     print(f"field bank of {bank.n} built in {time.time() - t0:.1f}s on {dev}", flush=True)
 
-    model = ActorCritic().to(dev)
+    model = ActorCritic(vec_dim=env.obs()["vec"].shape[1]).to(dev)
     if args.resume:
         model.load_state_dict(torch.load(args.resume, map_location=dev, weights_only=False)["state_dict"])
     opt = torch.optim.Adam(model.parameters(), lr=args.lr, eps=1e-5)

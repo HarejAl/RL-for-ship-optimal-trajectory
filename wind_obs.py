@@ -286,8 +286,12 @@ def wrap_wind_obs(base_env, obs_cfg):
     """Apply the observation wrapper described by obs_cfg to a ShipEnv:
     {'stencil': n, 'spacing': s}  -> WindStencilWrapper (flat, for MlpPolicy)
     otherwise WindObsWrapper(**cfg), plus FlattenObservation if cfg['flatten'].
-    A ship whose thrust bound differs from the reference also gets ReferenceThrustWrapper."""
+    A ship whose thrust bound differs from the reference also gets ReferenceThrustWrapper.
+    cfg['kappa_ref'] (parameter-free policies) inserts PerceivedWindWrapper."""
     cfg = dict(obs_cfg or {})
+    kappa_ref = cfg.pop("kappa_ref", None)
+    if kappa_ref is not None:
+        base_env = PerceivedWindWrapper(base_env, kappa_ref)
     if base_env.unwrapped.p.u_max != ShipParams().u_max:
         base_env = ReferenceThrustWrapper(base_env)
     if cfg.get("stencil"):
