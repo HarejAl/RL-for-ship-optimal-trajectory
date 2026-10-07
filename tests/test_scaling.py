@@ -118,3 +118,21 @@ def test_trained_policy_transfers_to_faster_ship():
     a, b = trajs
     n = min(len(a), len(b))
     assert np.allclose(a[:n], b[:n], atol=1e-3)
+
+
+def test_perceived_wind_wrapper():
+    """The policy sees the wind scaled by sqrt(kappa/kappa_ref); the dynamics keep the true wind."""
+    from wind_obs import PerceivedWindWrapper
+    w = generate_wind_field(5)
+    opts = dict(start=(2.0, 3.0), goal=(8.0, 7.0))
+    ref = WindObsWrapper(ShipEnv(wind=w, params=REF))
+    ship = ShipParams(cd_air=0.05)                       # kappa 0.1
+    per = WindObsWrapper(PerceivedWindWrapper(ShipEnv(wind=w, params=ship), kappa_ref=0.5))
+    o_ref, _ = ref.reset(seed=0, options=opts)
+    o_per, _ = per.reset(seed=0, options=opts)
+    f = np.sqrt(0.1 / 0.5)
+    assert np.allclose(o_per["vec"], o_ref["vec"])
+    assert np.allclose(o_per["local"][:2], f * o_ref["local"][:2], atol=1e-6)
+    assert np.allclose(o_per["global"][:2], f * o_ref["global"][:2], atol=1e-6)
+    per.step(np.array([3.0, 2.0]))
+    assert per.env.env.p is ship and per.env.env.wind is w   # true ship and wind drive the step

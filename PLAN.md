@@ -61,6 +61,13 @@ equivariance for free data efficiency) and an extra |W|^2 channel (wind force is
       same wind map, same straight-to-goal strategy, different ships -> track, speed, thrust,
       hull drag, wind drag, time, energy. Script `ship_scales_demo.py`.
 
+- [~] **A3** Windage by perception instead of a kappa input (Alex's proposal): train on ONE
+      kappa_ref and at deployment show the policy `W_eff = sqrt(kappa / kappa_ref) * W`
+      (`wind_obs.PerceivedWindWrapper`): a ship more prone to being pushed sees a stronger map.
+      Exact for the wind force on a ship at rest; approximate when moving (c_a also drags on the
+      ship's own motion). Measured with `kappa_perception_study.py` (DP on the true ship as the
+      optimum). Later ablation: kappa-input PPO vs fixed-kappa PPO + perceived wind.
+
 ### B. Pure RL on the GPU
 - [x] **B1** `gpu_env.py`: batched torch environment. Thousands of ships, each with its own
       generated field (bank refreshed during training, never the held-out seeds), its own kappa

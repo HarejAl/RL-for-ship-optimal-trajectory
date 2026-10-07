@@ -28,6 +28,7 @@ by `benchmark_dp.py` (seeds < 1e6).
 MLP for the vector, concatenated.
 """
 
+import dataclasses
 import json
 import os
 
@@ -241,6 +242,44 @@ class ReferenceThrustWrapper(gym.ActionWrapper):
 
     def action(self, action):
         return np.asarray(action, dtype=np.float64) * self.factor
+
+
+class _PerceivedView:
+    """What the policy is told: the real env, with the wind and ship swapped for perceived ones."""
+
+    def __init__(self, base, wind, params):
+        self._base, self.wind, self.p = base, wind, params
+
+    def __getattr__(self, name):
+        return getattr(self._base, name)
+
+
+class PerceivedWindWrapper(gym.Wrapper):
+    """
+    Deployment-time windage mapping: a policy trained on a ship of windage ratio kappa_ref is
+    shown the wind scaled by sqrt(kappa / kappa_ref), so a ship more prone to being pushed sees
+    a stronger map, while the dynamics keep the true wind and the true ship. The scaling matches
+    the wind force on a ship at rest; it is approximate once the ship moves (c_a also drags on
+    the ship's own motion through the air). Put it between ShipEnv and WindObsWrapper.
+    """
+
+    def __init__(self, env, kappa_ref=0.5):
+        from wind import WindField
+        super().__init__(env)
+        base = env.unwrapped
+        k = base.p.scales().windage
+        self.factor = float(np.sqrt(k / kappa_ref))
+        self.ref_params = dataclasses.replace(base.p, cd_air=kappa_ref * base.p.cd_water)
+        self._WindField = WindField
+        self._cache = (None, None)
+
+    @property
+    def unwrapped(self):
+        base = self.env.unwrapped
+        if self._cache[0] is not base.wind:
+            w = base.wind
+            self._cache = (w, self._WindField(w.x, w.y, self.factor * w.wx, self.factor * w.wy, meta=w.meta))
+        return _PerceivedView(base, self._cache[1], self.ref_params)
 
 
 def wrap_wind_obs(base_env, obs_cfg):
