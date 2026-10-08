@@ -76,14 +76,18 @@ equivariance for free data efficiency) and an extra |W|^2 channel (wind force is
       generated field (bank refreshed during training, never the held-out seeds), its own kappa
       and wind strength, start and goal. Check: observation identical to
       `WindObsWrapper(add_kappa=True)` and one step identical to `ShipEnv` (unit test).
-- [~] **B2** `train_ppo.py`: PPO on the GPU, separate actor and critic CNNs.
+- [x] **B2** `train_ppo.py`: PPO on the GPU, separate actor and critic CNNs.
       Reward `-stage_cost + gamma*Phi(s') - Phi(s)`, `Phi = -dist / V*`, out-of-bounds penalty.
       Parameter-free: fixed kappa_ref = 0.5, perceived wind for other ships (step A3), wind
       multiplier in [0.15, 1.0]. Validation reports success per ship kappa (0.05/0.1/0.25/0.5).
       Smoke run, measure steps/s.
-- [ ] **B3** Long run (overnight). Log curves in `output/logs/<tag>/`.
-- [ ] **B4** Evaluate against DP and `bc_t2` on the standard held-out cases
+- [x] **B3** Long run (overnight): `ppo_pf_v1`. Log curves in `output/logs/<tag>/`.
+- [~] **B4** Evaluate against DP and `bc_t2` on the standard held-out cases
       (`benchmark_dp.py --model models/<tag>.pt`): success, optimality gap, by kappa.
+
+- [ ] **B5** `ppo_pf_v2`: fix the one weak corner of v1 (kappa_ref ship in full-strength wind,
+      87%): sample the wind strength with more weight near and above 1.0 (it was uniform in
+      [0.15, 1.0], so full-strength wind was the rare tail), and re-test the edge goals.
 
 ### C. Generalisation
 - [ ] **C1** Time-varying wind during training (drifting and evolving fields).
@@ -109,3 +113,6 @@ equivariance for free data efficiency) and an extra |W|^2 channel (wind force is
 | 2026-10-06 | B2 | PPO smoke run, 2048 envs x 64 steps, 12 iterations (1.6M steps) | RTX 4070S **shared with another job at 100% GPU and ~11 GB**: ~2-3k steps/s (update 35-60 s/iter, memory spilled to system RAM) | train success 6% -> 86% (curriculum radius 1.0 -> 0.74); held-out success at the final 0.5 radius 6% -> 45%. Learns fast; throughput is entirely limited by the shared GPU |
 | 2026-10-07 | A3 | `kappa_route_demo.py`: `bc_t2` (kappa_ref 0.5) on ships kappa 0.05-0.6, perceived vs raw wind, 200 held-out cases, no DP | CPU (shared), ~15 min | **Theory confirmed.** Perceived: route deviation grows monotonically with kappa (0.35 -> 0.45 -> 0.80 -> 1.09 -> 1.19); raw stays ~1.0 at every kappa (the agent detours as if it were a kappa 0.5 ship). Low-windage ships gain the most: kappa 0.05 success 100% vs 88%, voyage time 2.24 vs 2.54 (-12%), cost J 3.07 vs 3.59 (-14%). Above kappa_ref (0.6) perceived is slightly worse on success (70% vs 76%): extrapolating beyond the training wind. Optimality vs DP: pending (`kappa_perception_study.py`) |
 | 2026-10-07 | A3 | `kappa_perception_study.py`: `bc_t2` vs DP solved on the TRUE ship, 30 held-out cases x 4 kappa | CPU (shared), ~90 min | DP 100% everywhere. Raw wind: success 83-87%, median gap +6.7% (kappa 0.05), +6.1% (0.1), +3.5% (0.25, 0.5). **Perceived wind: 100% / -0.3% (kappa 0.05), 97% / +0.6% (0.1), 93% / +1.2% (0.25), 83% / +3.5% (0.5).** The parameter-free mapping is near-optimal for low-windage (real) ships, better than the agent on its own training ship. Decision: drop the kappa input |
+| 2026-10-07/08 | B3 | `ppo_pf_v1`: parameter-free PPO, kappa_ref 0.5, wind x[0.15, 1], 2048 envs x 64 steps, 4 epochs, minibatch 4096 | **RTX 4070 SUPER, 12.0 h, 525.7M steps** (~8.3k steps/s for the first ~7 h while the GPU was shared, 21.7k steps/s alone) | Held-out validation success 98% after 26M steps (~1 h), best 99.2% (iter 3400, 446M steps; per kappa 0.05/0.1/0.25/0.5: 100/100/97.7/99.2%). Policy std 0.5 -> 0.01 |
+| 2026-10-08 | B4 | `ppo_pf_v1` vs DP on the true ship (same 30 cases x 4 kappa as `bc_t2`, DP reused) | GPU, ~1 min | **Perceived: 100% / -0.6% (kappa 0.05), 100% / -0.2% (0.1), 97% / +0.9% (0.25), 83% / +4.7% (0.5).** Raw wind: 83-97%, +2.9 to +4.7%. Better than `bc_t2` (100/97/93/83%, -0.3/+0.6/+1.2/+3.5%) except at kappa 0.5 in full wind. No DP teacher used |
+| 2026-10-08 | B4 | `ppo_pf_v1`, 1000 benchmark cases per kappa, GPU env, success only | GPU, ~2 min | kappa 0.05: 100% (wind x1.0) / 100% (x0.6); 0.1: 100 / 100%; 0.25: 98.2 / 100%; **0.5: 87.3 / 99.4%**. The only weak corner is the most extreme regime (wind authority A = 2.5, stronger than any real ship in A2) at full wind strength, which was the rare tail of the training distribution. 24% of cases have the goal within 0.5 of the spawn-box edge -> B5 |

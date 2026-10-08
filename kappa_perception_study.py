@@ -41,6 +41,8 @@ def parse_args():
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--threads", type=int, default=8)
     ap.add_argument("--tag", default=None)
+    ap.add_argument("--reuse-dp", default=None,
+                    help="CSV of an earlier run on the same cases: take its DP results instead of re-solving")
     return ap.parse_args()
 
 
@@ -49,6 +51,15 @@ def main():
     torch.set_num_threads(args.threads)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     model, obs_cfg = load_model(os.path.join(SCRIPT_DIR, args.model))
+    obs_cfg = dict(obs_cfg)
+    kref = obs_cfg.pop("kappa_ref", None)   # this study applies the perception itself, raw vs perceived
+    if kref is not None and kref != args.kappa_ref:
+        raise SystemExit(f"model was trained at kappa_ref={kref}; pass --kappa-ref {kref}")
+    reuse = {}
+    if args.reuse_dp:
+        with open(args.reuse_dp) as f:
+            for r in csv.DictReader(f):
+                reuse[(float(r["kappa"]), int(r["case"]))] = (float(r["dp_J"]), bool(int(r["dp_ok"])))
     rows = []
     for kappa in args.kappas:
         params = ShipParams(cd_air=kappa * ShipParams().cd_water)
@@ -58,10 +69,14 @@ def main():
             env.reset(seed=k)
             start, goal = env.state[:2].copy(), env.goal.copy()
             t0 = time.time()
-            planner = ValueIterationPlanner(wind, goal, params=params, nx=61, ny=61, nv=13, n_act=5,
-                                            exec_n_act=9, device=args.device)
-            planner.solve(max_iter=3000, tol=1e-4, verbose=False)
-            dp = planner.rollout(env, start)
+            if (kappa, k) in reuse:
+                J, ok = reuse[(kappa, k)]
+                dp = dict(J=J, success=ok)
+            else:
+                planner = ValueIterationPlanner(wind, goal, params=params, nx=61, ny=61, nv=13, n_act=5,
+                                                exec_n_act=9, device=args.device)
+                planner.solve(max_iter=3000, tol=1e-4, verbose=False)
+                dp = planner.rollout(env, start)
             t_dp = time.time() - t0
             raw = rollout_policy(model, wrap_wind_obs(ShipEnv(wind, params=params), obs_cfg), start, goal, wind)
             per = rollout_policy(model, wrap_wind_obs(PerceivedWindWrapper(ShipEnv(wind, params=params),
