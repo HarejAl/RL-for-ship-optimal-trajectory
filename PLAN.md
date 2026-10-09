@@ -85,9 +85,12 @@ equivariance for free data efficiency) and an extra |W|^2 channel (wind force is
 - [~] **B4** Evaluate against DP and `bc_t2` on the standard held-out cases
       (`benchmark_dp.py --model models/<tag>.pt`): success, optimality gap, by kappa.
 
-- [ ] **B5** `ppo_pf_v2`: fix the one weak corner of v1 (kappa_ref ship in full-strength wind,
-      87%): sample the wind strength with more weight near and above 1.0 (it was uniform in
-      [0.15, 1.0], so full-strength wind was the rare tail), and re-test the edge goals.
+- [ ] **B5** `ppo_pf_v2`: (1) **kappa_ref ~ 0.1** instead of 0.5, inside the real-ship range
+      (0.02-0.2): the perceived-wind mapping is exact for the wind push but not for the ship's own
+      air drag, and with kappa_ref = 0.5 a real ship is faster than the agent expects for its
+      thrust, so it throttles back (see D0: -7% speed, +1.5-2% cost). (2) Wind strength up to
+      ~1.5x and weighted toward the top, so sqrt(kappa / kappa_ref) for kappa up to 0.2 and the
+      full-strength corner of v1 (87%) are both inside training. (3) Re-test the edge goals.
 
 ### C. Generalisation
 - [ ] **C1** Time-varying wind during training (drifting and evolving fields).
@@ -97,6 +100,12 @@ equivariance for free data efficiency) and an extra |W|^2 channel (wind force is
 - [ ] **C3** Inertia regime: randomise D/L*. Real ships have D/L* >> 1 (quasi-steady, Zermelo
       regime) where zooming is exact; our toy domain has D/L* = 5.
 - [ ] **C4** Receding-horizon evaluation on real forecasts vs DP re-solved at each update.
+
+### D0. Deployment demo on real forecasts
+- [x] `real_routes_demo.py`: container ship Lisbon -> Funchal (513 nm) and 20 m yacht Venice ->
+      Rovinj (53 nm) on the live Open-Meteo forecast, deployed by scaling only (km per unit,
+      V*, sqrt(kappa / kappa_ref)); compared with straight-line sailing at the economical and at
+      full throttle. Coastline from the Open-Meteo elevation API (the model has no land).
 
 ### D. Paper
 - [ ] **D1** Figures and tables from the log below; ablations (obs design, shaping, kappa input).
@@ -116,3 +125,4 @@ equivariance for free data efficiency) and an extra |W|^2 channel (wind force is
 | 2026-10-07/08 | B3 | `ppo_pf_v1`: parameter-free PPO, kappa_ref 0.5, wind x[0.15, 1], 2048 envs x 64 steps, 4 epochs, minibatch 4096 | **RTX 4070 SUPER, 12.0 h, 525.7M steps** (~8.3k steps/s for the first ~7 h while the GPU was shared, 21.7k steps/s alone) | Held-out validation success 98% after 26M steps (~1 h), best 99.2% (iter 3400, 446M steps; per kappa 0.05/0.1/0.25/0.5: 100/100/97.7/99.2%). Policy std 0.5 -> 0.01 |
 | 2026-10-08 | B4 | `ppo_pf_v1` vs DP on the true ship (same 30 cases x 4 kappa as `bc_t2`, DP reused) | GPU, ~1 min | **Perceived: 100% / -0.6% (kappa 0.05), 100% / -0.2% (0.1), 97% / +0.9% (0.25), 83% / +4.7% (0.5).** Raw wind: 83-97%, +2.9 to +4.7%. Better than `bc_t2` (100/97/93/83%, -0.3/+0.6/+1.2/+3.5%) except at kappa 0.5 in full wind. No DP teacher used |
 | 2026-10-08 | B4 | `ppo_pf_v1`, 1000 benchmark cases per kappa, GPU env, success only | GPU, ~2 min | kappa 0.05: 100% (wind x1.0) / 100% (x0.6); 0.1: 100 / 100%; 0.25: 98.2 / 100%; **0.5: 87.3 / 99.4%**. The only weak corner is the most extreme regime (wind authority A = 2.5, stronger than any real ship in A2) at full wind strength, which was the rare tail of the training distribution. 24% of cases have the goal within 0.5 of the spawn-box edge -> B5 |
+| 2026-10-09 | D0 | `real_routes_demo.py`, `ppo_pf_v1`, live Open-Meteo, departures every 6 h over the 3-day window (7 container, 11 yacht) | CPU, ~10 min | Deployment by scaling works: 1 unit = 118.8 km / 12.2 km, wind shown x0.38 / x0.42, decisions every 36.9 / 7.6 min; every voyage arrives. In this week's moderate weather (max 9-15 m/s) the best route is close to the straight line, and the agent sails it: cost J **+1.6 to +2.3%** vs straight at the economical throttle (one yacht departure -0.3%), always ~7% slower and ~10% less energy. Cause found: in calm air the agent cruises at 0.566 of the thrust bound on its own kappa 0.5 ship (optimum 0.577) but at 0.533 on a kappa 0.05 ship (speed 3.14 vs optimal 3.32 units): the real ship is faster than expected for its thrust (lower own air drag) and the agent throttles back. Fix in B5 (kappa_ref ~ 0.1) |
